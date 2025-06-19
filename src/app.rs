@@ -5,83 +5,123 @@ use crate::registry;
 
 const ITEM_HEIGHT: usize = 1;
 
-struct RegistryContext {
-    state: TableState,
-    scroll_state: ScrollbarState,
-    items: Vec<String>,
+struct KeyState {
+    key: windows_registry::Key,
+    subkeys: Vec<String>,
 
-    current_base_key: Option<&'static windows_registry::Key>,
-    current_key: Option<windows_registry::Key>,
-    current_path: String,
+    path_cache: String,
+    // values_cache: HashMap<(), ()>, // for future use
+}
+
+impl KeyState {
+    fn new(key: windows_registry::Key, name: String, subkeys: Vec<String>, last_path: String) -> Self {
+        let new_path = format!("{last_path} -> {name}");
+
+        Self { key, subkeys, path_cache: new_path }
+    }
+}
+
+struct AppContext {
+    key_table_state: TableState,
+    key_scroll_state: ScrollbarState,
+
+    base_subkeys: Vec<String>,
+    base_path: String,
+    key_states: Vec<KeyState>,
 }
 
 pub struct App {
-    context: RegistryContext,
+    context: AppContext,
 }
 
-impl RegistryContext {
+impl AppContext {
     fn new() -> Self {
-        let items: Vec<String> = Vec::from(registry::get_default_keys().map(|(_, name)| name.into()));
+        let base_subkeys: Vec<String> = Vec::from(registry::get_default_keys().map(|(_, name)| name.into()));
 
         Self {
-            state: TableState::default().with_selected(0),
-            scroll_state: ScrollbarState::new(items.len() * ITEM_HEIGHT),
-            items,
+            key_table_state: TableState::default().with_selected(0),
+            key_scroll_state: ScrollbarState::new(base_subkeys.len() * ITEM_HEIGHT),
 
-            current_base_key: None,
-            current_key: None,
-            current_path: String::from("Computer"),
+            base_subkeys,
+            base_path: String::from("Computer"),
+
+            key_states: Vec::new(),
         }
     }
 
-    fn select_base(&mut self, path: &str) {
-        if self.current_base_key.is_some() || self.current_key.is_some() {
-            return;
-        }
+    fn create_subkeys(&self, key: &windows_registry::Key) -> Vec<String> {
+        let mut subkeys = registry::read_subkeys(key);
+
+        // add subkey to go back
+        subkeys.insert(0, "..".into());
+
+        subkeys
+    }
+
+    fn select_base(&mut self, index: usize) {
+        let path = &self.base_subkeys[index].clone();
 
         let default = registry::get_default_keys();
-        let (key, _) = default.iter().find(|(_, s)| *s == path).unwrap();
+        let (key, name) = default.iter().find(|(_, s)| *s == path).unwrap();
 
-        self.items = registry::read_subkeys(*key);
-        self.current_base_key = Some(key);
+        let subkeys = self.create_subkeys(key);
+        let key = key.open("").unwrap();
+        let new_state = KeyState::new(key, String::from(*name), subkeys, self.base_path.clone());
+
+        self.key_states.push(new_state);
     }
 
-    fn select_key(&mut self, path: &str) {
-        if self.current_base_key.is_none() {
-            return;
-        }
+    fn select_key(&mut self, index: usize) {
+        match index {
+            0 => { // ".." subkey
+                let _ = self.key_states.pop();
+            }
+            _ => {
+                let path = &self.get_subkeys()[index].clone();
+                let current_state = self.key_states.last().unwrap();
 
-        self.current_key = match self.current_key.take() {
-            Some(key) => Some(registry::read_key(&key, path)),
-            None => Some(registry::read_key(self.current_base_key.unwrap(), path)),
+                let key = registry::read_key(&current_state.key, path);
+                let subkeys = self.create_subkeys(&key);
+                let new_state = KeyState::new(key, path.to_owned(), subkeys, current_state.path_cache.clone());
+
+                self.key_states.push(new_state);
+            }
         };
-
-        self.items = registry::read_subkeys(self.current_key.as_ref().unwrap());
     }
 
     fn select(&mut self) {
-        let i = self.state.selected();
+        let i = self.key_table_state.selected();
         if i.is_none() {
             return;
         }
 
         let i = i.unwrap();
-        let path = self.items.get(i).unwrap().to_owned();
 
-        match self.current_base_key {
-            Some(_) => self.select_key(path.as_str()),
-            None => self.select_base(path.as_str()),
+        match self.key_states.is_empty() {
+            true => self.select_base(i),
+            false => self.select_key(i),
+        };
+    }
+
+    fn get_path(&self) -> &str {
+        match self.key_states.is_empty() {
+            true => self.base_path.as_str(),
+            false => self.key_states.last().unwrap().path_cache.as_str(),
         }
+    }
 
-        self.current_path.push_str(" -> ");
-        self.current_path.push_str(path.as_str());
+    fn get_subkeys(&self) -> &Vec<String> {
+        match self.key_states.is_empty() {
+            true => &self.base_subkeys,
+            false => &self.key_states.last().unwrap().subkeys,
+        }
     }
 }
 
 impl App {
     pub fn new() -> Self {
         Self {
-            context: RegistryContext::new(),
+            context: AppContext::new(),
         }
     }
 
@@ -113,9 +153,9 @@ impl App {
     }
 
     fn next_row(&mut self) {
-        let i = match self.context.state.selected() {
+        let i = match self.context.key_table_state.selected() {
             Some(i) => {
-                if i >= self.context.items.len() - 1 {
+                if i >= self.context.get_subkeys().len() - 1 {
                     i
                 } else {
                     i + 1
@@ -124,12 +164,12 @@ impl App {
             None => 0,
         };
 
-        self.context.state.select(Some(i));
-        self.context.scroll_state = self.context.scroll_state.position(i * ITEM_HEIGHT);
+        self.context.key_table_state.select(Some(i));
+        self.context.key_scroll_state = self.context.key_scroll_state.position(i * ITEM_HEIGHT);
     }
 
     fn prev_row(&mut self) {
-        let i = match self.context.state.selected() {
+        let i = match self.context.key_table_state.selected() {
             Some(i) => {
                 if i == 0 {
                     i
@@ -140,8 +180,8 @@ impl App {
             None => 0,
         };
 
-        self.context.state.select(Some(i));
-        self.context.scroll_state = self.context.scroll_state.position(i * ITEM_HEIGHT);
+        self.context.key_table_state.select(Some(i));
+        self.context.key_scroll_state = self.context.key_scroll_state.position(i * ITEM_HEIGHT);
     }
 
     fn select(&mut self) {
@@ -166,7 +206,7 @@ impl App {
             .style(header_style)
             .height(1);
 
-        let rows = self.context.items.iter().map(|item| {
+        let rows = self.context.get_subkeys().iter().map(|item| {
             Row::new(vec![Cell::from(Text::from(item.to_owned()))]).height(ITEM_HEIGHT as u16)
         });
         let table = Table::new(rows, [Constraint::Min(0)])
@@ -174,8 +214,7 @@ impl App {
             .row_highlight_style(selected_style)
             .block(block);
 
-
-        frame.render_stateful_widget(table, area, &mut self.context.state);
+        frame.render_stateful_widget(table, area, &mut self.context.key_table_state);
 
         frame.render_stateful_widget(
             Scrollbar::default()
@@ -183,7 +222,7 @@ impl App {
                 .begin_symbol(None)
                 .end_symbol(None),
             area.inner(Margin { vertical: 1, horizontal: 1 }),
-            &mut self.context.scroll_state);
+            &mut self.context.key_scroll_state);
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -195,7 +234,7 @@ impl App {
         let bold_style = Style::new().bold();
 
         let title_block = Block::bordered().title("Regedit").style(bold_style);
-        let title_content = Paragraph::new(self.context.current_path.as_str()).block(title_block);
+        let title_content = Paragraph::new(self.context.get_path()).block(title_block);
         frame.render_widget(title_content, title_area);
 
         self.render_table(frame, main_area.clone());
