@@ -5,6 +5,11 @@ use crate::registry;
 
 const ITEM_HEIGHT: usize = 1;
 
+enum ViewState {
+    Base,
+    Subkey,
+}
+
 struct KeyState {
     key: windows_registry::Key,
     subkeys: Vec<String>,
@@ -49,6 +54,13 @@ impl AppContext {
         }
     }
 
+    fn get_view_state(&self) -> ViewState {
+        match self.key_states.is_empty() {
+            true => ViewState::Base,
+            false => ViewState::Subkey,
+        }
+    }
+
     fn create_subkeys(&self, key: &windows_registry::Key) -> Vec<String> {
         let mut subkeys = registry::read_subkeys(key);
 
@@ -59,7 +71,7 @@ impl AppContext {
     }
 
     fn select_base(&mut self, index: usize) {
-        let path = &self.base_subkeys[index].clone();
+        let path = &self.base_subkeys[index];
 
         let default = registry::get_default_keys();
         let (key, name) = default.iter().find(|(_, s)| *s == path).unwrap();
@@ -77,7 +89,7 @@ impl AppContext {
                 let _ = self.key_states.pop();
             }
             _ => {
-                let path = &self.get_subkeys()[index].clone();
+                let path = &self.get_subkeys()[index];
                 let current_state = self.key_states.last().unwrap();
 
                 let key = registry::read_key(&current_state.key, path);
@@ -97,23 +109,23 @@ impl AppContext {
 
         let i = i.unwrap();
 
-        match self.key_states.is_empty() {
-            true => self.select_base(i),
-            false => self.select_key(i),
+        match self.get_view_state() {
+            ViewState::Base => self.select_base(i),
+            ViewState::Subkey => self.select_key(i),
         };
     }
 
     fn get_path(&self) -> &str {
-        match self.key_states.is_empty() {
-            true => self.base_path.as_str(),
-            false => self.key_states.last().unwrap().path_cache.as_str(),
+        match self.get_view_state() {
+            ViewState::Base => self.base_path.as_str(),
+            ViewState::Subkey => self.key_states.last().unwrap().path_cache.as_str(),
         }
     }
 
     fn get_subkeys(&self) -> &Vec<String> {
-        match self.key_states.is_empty() {
-            true => &self.base_subkeys,
-            false => &self.key_states.last().unwrap().subkeys,
+        match self.get_view_state() {
+            ViewState::Base => &self.base_subkeys,
+            ViewState::Subkey => &self.key_states.last().unwrap().subkeys,
         }
     }
 }
