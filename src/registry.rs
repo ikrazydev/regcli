@@ -1,4 +1,4 @@
-use windows_registry::Key;
+use windows_registry::{Key, Value};
 
 pub fn get_default_keys() -> [(&'static Key, &'static str); 5] {
     [
@@ -22,4 +22,8 @@ pub fn read_key(key: &Key, path: &str) -> Key {
 
 pub fn read_subkeys(key: &Key) -> Vec<String> {
     key.keys().unwrap().collect()
+}
+
+pub fn read_values(key: &Key) -> Vec<(String, Value)> {
+    key.values().unwrap().collect()
 }

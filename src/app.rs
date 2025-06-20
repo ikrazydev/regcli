@@ -1,13 +1,41 @@
+use std::collections::HashMap;
+
 use crossterm::event::{self, Event, KeyCode};
-use ratatui::{layout::{Constraint, Layout, Margin, Rect}, prelude::Backend, style::{Style, Stylize}, text::{Line, Text}, widgets::{Block, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState}, Frame, Terminal};
+use ratatui::{layout::{Constraint, Layout, Margin, Rect}, prelude::Backend, style::{Style, Stylize}, text::{Line, Span}, widgets::{Block, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState}, Frame, Terminal};
 
 use crate::registry;
 
 const ITEM_HEIGHT: usize = 1;
 
-enum ViewState {
+struct ScrollableTableState {
+    state: TableState,
+    scroll: ScrollbarState,
+}
+
+impl ScrollableTableState {
+    fn new(content_length: usize) -> Self {
+        Self {
+            state: TableState::default().with_selected(0),
+            scroll: ScrollbarState::new(content_length),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum KeyViewState {
     Base,
     Subkey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ViewState {
+    Keys,
+    Values
+}
+
+struct NamedValue {
+    name: String,
+    value: windows_registry::Value,
 }
 
 struct KeyState {
@@ -15,20 +43,21 @@ struct KeyState {
     subkeys: Vec<String>,
 
     path_cache: String,
-    // values_cache: HashMap<(), ()>, // for future use
+    values_cache: HashMap<String, NamedValue>,
 }
 
 impl KeyState {
     fn new(key: windows_registry::Key, name: String, subkeys: Vec<String>, last_path: String) -> Self {
         let new_path = format!("{last_path} -> {name}");
 
-        Self { key, subkeys, path_cache: new_path }
+        Self { key, subkeys, path_cache: new_path, values_cache: HashMap::new() }
     }
 }
 
 struct AppContext {
-    key_table_state: TableState,
-    key_scroll_state: ScrollbarState,
+    key_table: ScrollableTableState,
+    value_table: ScrollableTableState,
+    view_state: ViewState,
 
     base_subkeys: Vec<String>,
     base_path: String,
@@ -44,8 +73,9 @@ impl AppContext {
         let base_subkeys: Vec<String> = Vec::from(registry::get_default_keys().map(|(_, name)| name.into()));
 
         Self {
-            key_table_state: TableState::default().with_selected(0),
-            key_scroll_state: ScrollbarState::new(base_subkeys.len() * ITEM_HEIGHT),
+            key_table: ScrollableTableState::new(base_subkeys.len() * ITEM_HEIGHT),
+            value_table: ScrollableTableState::new(100 * ITEM_HEIGHT),
+            view_state: ViewState::Keys,
 
             base_subkeys,
             base_path: String::from("Computer"),
@@ -54,10 +84,61 @@ impl AppContext {
         }
     }
 
-    fn get_view_state(&self) -> ViewState {
+    fn get_selected_table(&mut self) -> &mut ScrollableTableState {
+        match self.view_state {
+            ViewState::Keys => &mut self.key_table,
+            ViewState::Values => &mut self.value_table,
+        }
+    }
+
+    fn switch_views(&mut self) {
+        self.view_state = match self.view_state {
+            ViewState::Keys => ViewState::Values,
+            ViewState::Values => ViewState::Keys,
+        };
+    }
+
+    fn next_row(&mut self) {
+        let table = self.get_selected_table();
+        let max = 100; // temp
+
+        let i = match table.state.selected() {
+            Some(i) => {
+                if i > max {
+                    i
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+
+        table.state.select(Some(i));
+        table.scroll = table.scroll.position(i * ITEM_HEIGHT);
+    }
+
+    fn prev_row(&mut self) {
+        let table = self.get_selected_table();
+
+        let i = match table.state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    i
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+
+        table.state.select(Some(i));
+        table.scroll = table.scroll.position(i * ITEM_HEIGHT);
+    }
+
+    fn get_key_view_state(&self) -> KeyViewState {
         match self.key_states.is_empty() {
-            true => ViewState::Base,
-            false => ViewState::Subkey,
+            true => KeyViewState::Base,
+            false => KeyViewState::Subkey,
         }
     }
 
@@ -102,30 +183,30 @@ impl AppContext {
     }
 
     fn select(&mut self) {
-        let i = self.key_table_state.selected();
+        let i = self.key_table.state.selected();
         if i.is_none() {
             return;
         }
 
         let i = i.unwrap();
 
-        match self.get_view_state() {
-            ViewState::Base => self.select_base(i),
-            ViewState::Subkey => self.select_key(i),
+        match self.get_key_view_state() {
+            KeyViewState::Base => self.select_base(i),
+            KeyViewState::Subkey => self.select_key(i),
         };
     }
 
     fn get_path(&self) -> &str {
-        match self.get_view_state() {
-            ViewState::Base => self.base_path.as_str(),
-            ViewState::Subkey => self.key_states.last().unwrap().path_cache.as_str(),
+        match self.get_key_view_state() {
+            KeyViewState::Base => self.base_path.as_str(),
+            KeyViewState::Subkey => self.key_states.last().unwrap().path_cache.as_str(),
         }
     }
 
     fn get_subkeys(&self) -> &Vec<String> {
-        match self.get_view_state() {
-            ViewState::Base => &self.base_subkeys,
-            ViewState::Subkey => &self.key_states.last().unwrap().subkeys,
+        match self.get_key_view_state() {
+            KeyViewState::Base => &self.base_subkeys,
+            KeyViewState::Subkey => &self.key_states.last().unwrap().subkeys,
         }
     }
 }
@@ -153,9 +234,10 @@ impl App {
         match event::read()? {
             Event::Key(event) if event.is_press() => match event.code {
                 KeyCode::Esc => return Ok(true),
-                KeyCode::Char('j') => self.next_row(),
-                KeyCode::Char('k') => self.prev_row(),
-                KeyCode::Enter => self.select(),
+                KeyCode::Char('j') | KeyCode::Char('J') => self.context.next_row(),
+                KeyCode::Char('k') | KeyCode::Char('K') => self.context.prev_row(),
+                KeyCode::Tab => self.context.switch_views(),
+                KeyCode::Enter => self.context.select(),
                 _ => (),
             }
             _ => (),
@@ -164,46 +246,56 @@ impl App {
         Ok(false)
     }
 
-    fn next_row(&mut self) {
-        let i = match self.context.key_table_state.selected() {
-            Some(i) => {
-                if i >= self.context.get_subkeys().len() - 1 {
-                    i
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
+    fn render_title(&mut self, frame: &mut Frame, area: Rect) {
+        let bold_style = Style::new().bold();
 
-        self.context.key_table_state.select(Some(i));
-        self.context.key_scroll_state = self.context.key_scroll_state.position(i * ITEM_HEIGHT);
+        let title_block = Block::bordered().title("Regedit").style(bold_style);
+        let title_content = Paragraph::new(self.context.get_path()).block(title_block);
+        frame.render_widget(title_content, area);
     }
 
-    fn prev_row(&mut self) {
-        let i = match self.context.key_table_state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    i
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
+    fn render_subkey_table(&mut self, frame: &mut Frame, area: Rect) {
+        let header = ["Key"];
 
-        self.context.key_table_state.select(Some(i));
-        self.context.key_scroll_state = self.context.key_scroll_state.position(i * ITEM_HEIGHT);
+        let subkeys = self.context.get_subkeys().clone();
+        let rows = subkeys.into_iter().map(|item| {
+            Row::new(vec![item])
+                .height(ITEM_HEIGHT as u16)
+        });
+
+        let is_disabled = self.context.view_state == ViewState::Keys;
+        Self::render_table(frame, header, rows, &mut self.context.key_table, is_disabled, area);
     }
 
-    fn select(&mut self) {
-        self.context.select();
+    fn render_value_table(&mut self, frame: &mut Frame, area: Rect) {
+        let header = ["Name", "Type", "Value"];
+        let rows = (1..=100)
+            .map(|i| format!("Item {}", i))
+            .map(|text| Row::new(
+                vec![text, "None".into(), "Default".into()]
+            ).height(ITEM_HEIGHT as u16)
+        );
+
+        let is_disabled = self.context.view_state == ViewState::Values;
+        Self::render_table(frame, header, rows, &mut self.context.value_table, is_disabled, area);
     }
 
-    fn render_table(&mut self, frame: &mut Frame, area: Rect) {
-        let selected_style = Style::default()
+    fn render_table<'a, const N: usize, R>(frame: &mut Frame, header: [&str; N], rows: R, table: &mut ScrollableTableState, is_disabled: bool, area: Rect)
+    where
+        R: IntoIterator,
+        R::Item: Into<Row<'a>>
+    {
+        let enabled_style = Style::default()
             .black()
             .on_white();
+        let disabled_style = Style::default()
+            .black()
+            .on_gray();
+        let selected_style = match is_disabled {
+            true => enabled_style,
+            false => disabled_style,
+        };
+
         let header_style = Style::default()
             .white()
             .on_dark_gray()
@@ -211,57 +303,79 @@ impl App {
 
         let block = Block::bordered();
 
-        let header = ["Registry Key"]
+        let header = header
             .into_iter()
             .map(Cell::from)
             .collect::<Row>()
             .style(header_style)
             .height(1);
 
-        let rows = self.context.get_subkeys().iter().map(|item| {
-            Row::new(vec![Cell::from(Text::from(item.to_owned()))]).height(ITEM_HEIGHT as u16)
-        });
-        let table = Table::new(rows, [Constraint::Min(0)])
+        let widget = Table::new(rows, [Constraint::Min(0)].repeat(N))
             .header(header)
             .row_highlight_style(selected_style)
             .block(block);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
 
-        frame.render_stateful_widget(table, area, &mut self.context.key_table_state);
-
+        frame.render_stateful_widget(widget, area, &mut table.state);
         frame.render_stateful_widget(
-            Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None),
-            area.inner(Margin { vertical: 1, horizontal: 1 }),
-            &mut self.context.key_scroll_state);
+            scrollbar,
+            area.inner(Margin { horizontal: 1, vertical: 1 }),
+            &mut table.scroll);
     }
 
-    fn draw(&mut self, frame: &mut Frame) {
-        use Constraint::{Length, Min};
+    fn render_main_area(&mut self, frame: &mut Frame, area: Rect) {
+        use Constraint::{Percentage, Min};
 
-        let vertical = Layout::vertical([Length(3), Min(0), Length(3)]);
-        let [title_area, main_area, status_area] = vertical.areas(frame.area());
+        let layout = Layout::horizontal([Percentage(40), Min(0)]);
+        let [subkey_area, value_area] = layout.areas(area);
 
-        let bold_style = Style::new().bold();
+        self.render_subkey_table(frame, subkey_area);
+        self.render_value_table(frame, value_area);
+    }
 
-        let title_block = Block::bordered().title("Regedit").style(bold_style);
-        let title_content = Paragraph::new(self.context.get_path()).block(title_block);
-        frame.render_widget(title_content, title_area);
+    fn get_additional_keybinds(&self) -> Vec<Span<'_>> {
+        match self.context.view_state {
+            ViewState::Keys => vec![
+                " <Enter> ".black().on_light_cyan().bold(),
+                " Select ".into(),
+            ],
+            ViewState::Values => vec![
+                " <null> ".black().on_light_cyan().bold(),
+                " Currently Disabled ".into(),
+            ],
+        }
+    }
 
-        self.render_table(frame, main_area.clone());
-
-        let status = Line::from(vec![
+    fn render_status(&mut self, frame: &mut Frame, area: Rect) {
+        let mut keybinds = vec![
             " <Esc> ".black().on_white().bold(),
             " Quit ".into(),
             " <J> ".black().on_white().bold(),
             " Down ".into(),
             " <K> ".black().on_white().bold(),
             " Up ".into(),
-            " <Enter> ".black().on_white().bold(),
-            " Select ".into(),
-        ]);
+            " <Tab> ".black().on_white().bold(),
+            " Switch Views ".into(),
+        ];
 
-        frame.render_widget(status, status_area);
+        keybinds.append(&mut self.get_additional_keybinds());
+
+        let status = Line::from(keybinds);
+
+        frame.render_widget(status, area);
+    }
+
+    fn draw(&mut self, frame: &mut Frame) {
+        use Constraint::{Length, Min};
+
+        let layout = Layout::vertical([Length(3), Min(0), Length(2)]);
+        let [title_area, main_area, status_area] = layout.areas(frame.area());
+
+        self.render_title(frame, title_area);
+        self.render_main_area(frame, main_area);
+        self.render_status(frame, status_area);
     }
 }
