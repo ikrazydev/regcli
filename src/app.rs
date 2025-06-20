@@ -19,6 +19,10 @@ impl ScrollableTableState {
             scroll: ScrollbarState::new(content_length),
         }
     }
+
+    fn resize(&mut self, content_length: usize) {
+        self.scroll = self.scroll.content_length(content_length);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -33,9 +37,16 @@ enum ViewState {
     Values
 }
 
+#[derive(Debug, Clone)]
 struct NamedValue {
     name: String,
     value: windows_registry::Value,
+}
+
+impl NamedValue {
+    const fn new(name: String, value: windows_registry::Value) -> Self {
+        Self { name, value }
+    }
 }
 
 struct KeyState {
@@ -43,7 +54,7 @@ struct KeyState {
     subkeys: Vec<String>,
 
     path_cache: String,
-    values_cache: HashMap<String, NamedValue>,
+    values_cache: HashMap<String, Vec<NamedValue>>,
 }
 
 impl KeyState {
@@ -60,7 +71,7 @@ struct AppContext {
     view_state: ViewState,
 
     base_subkeys: Vec<String>,
-    base_path: String,
+    base_path: &'static str,
     key_states: Vec<KeyState>,
 }
 
@@ -78,30 +89,65 @@ impl AppContext {
             view_state: ViewState::Keys,
 
             base_subkeys,
-            base_path: String::from("Computer"),
+            base_path: "Computer",
 
             key_states: Vec::new(),
         }
     }
 
-    fn get_selected_table(&mut self) -> &mut ScrollableTableState {
+    const fn get_selected_table(&mut self) -> &mut ScrollableTableState {
         match self.view_state {
             ViewState::Keys => &mut self.key_table,
             ViewState::Values => &mut self.value_table,
         }
     }
 
-    fn switch_views(&mut self) {
+    const fn switch_views(&mut self) {
         self.view_state = match self.view_state {
             ViewState::Keys => ViewState::Values,
             ViewState::Values => ViewState::Keys,
         };
     }
 
+    fn update_values(&mut self) {
+        let i = match self.key_table.state.selected() {
+            Some(i) => i,
+            None => return,
+        };
+
+        let key_name = self.get_subkeys()[i].clone();
+        let key_state = match self.key_states.last_mut() {
+            Some(key_state) => key_state,
+            None => return,
+        };
+
+        let entry = key_state.values_cache.entry(key_name.clone()).or_insert_with(|| {
+            let key = registry::read_key(&key_state.key, key_name.as_str());
+            registry::read_values(&key).into_iter().map(|(name, value)| NamedValue::new(name, value)).collect()
+        });
+
+        self.value_table.resize(entry.len() * ITEM_HEIGHT);
+    }
+
+    fn get_values(&self) -> Option<&Vec<NamedValue>> {
+        let i = match self.key_table.state.selected() {
+            Some(i) => i,
+            None => return None,
+        };
+
+        let key_name = &self.get_subkeys()[i];
+        let key_state = match self.key_states.last() {
+            Some(key_state) => key_state,
+            None => return None,
+        };
+
+        key_state.values_cache.get(key_name)
+    }
+
     fn next_row(&mut self) {
         let table = self.get_selected_table();
         let max = 100; // temp
-
+        
         let i = match table.state.selected() {
             Some(i) => {
                 if i > max {
@@ -112,14 +158,18 @@ impl AppContext {
             }
             None => 0,
         };
-
+        
         table.state.select(Some(i));
         table.scroll = table.scroll.position(i * ITEM_HEIGHT);
+
+        if self.view_state == ViewState::Keys {
+            self.update_values();
+        }
     }
 
     fn prev_row(&mut self) {
         let table = self.get_selected_table();
-
+        
         let i = match table.state.selected() {
             Some(i) => {
                 if i == 0 {
@@ -133,6 +183,10 @@ impl AppContext {
 
         table.state.select(Some(i));
         table.scroll = table.scroll.position(i * ITEM_HEIGHT);
+
+        if self.view_state == ViewState::Keys {
+            self.update_values();
+        }
     }
 
     fn get_key_view_state(&self) -> KeyViewState {
@@ -159,7 +213,7 @@ impl AppContext {
 
         let subkeys = self.create_subkeys(key);
         let key = key.open("").unwrap();
-        let new_state = KeyState::new(key, String::from(*name), subkeys, self.base_path.clone());
+        let new_state = KeyState::new(key, String::from(*name), subkeys, self.base_path.to_owned());
 
         self.key_states.push(new_state);
     }
@@ -194,11 +248,13 @@ impl AppContext {
             KeyViewState::Base => self.select_base(i),
             KeyViewState::Subkey => self.select_key(i),
         };
+
+        self.key_table.resize(self.get_subkeys().len() * ITEM_HEIGHT);
     }
 
     fn get_path(&self) -> &str {
         match self.get_key_view_state() {
-            KeyViewState::Base => self.base_path.as_str(),
+            KeyViewState::Base => self.base_path,
             KeyViewState::Subkey => self.key_states.last().unwrap().path_cache.as_str(),
         }
     }
@@ -269,11 +325,21 @@ impl App {
 
     fn render_value_table(&mut self, frame: &mut Frame, area: Rect) {
         let header = ["Name", "Type", "Value"];
-        let rows = (1..=100)
-            .map(|i| format!("Item {}", i))
-            .map(|text| Row::new(
-                vec![text, "None".into(), "Default".into()]
-            ).height(ITEM_HEIGHT as u16)
+        let values = match self.context.get_values().cloned() {
+            Some(values) => values,
+            None => return,
+        };
+
+        let rows = values.into_iter()
+            .map(|v| {
+                let name = v.name.clone();
+                let ty = registry::get_printable_type(v.value.ty()).to_owned();
+                let value = registry::get_printable_value(&v.value);
+
+                Row::new(
+                    vec![name, ty, value]
+                )
+            }
         );
 
         let is_disabled = self.context.view_state == ViewState::Values;
@@ -344,7 +410,7 @@ impl App {
             ],
             ViewState::Values => vec![
                 " <null> ".black().on_light_cyan().bold(),
-                " Currently Disabled ".into(),
+                " TODO ".into(),
             ],
         }
     }

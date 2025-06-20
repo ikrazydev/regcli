@@ -1,4 +1,4 @@
-use windows_registry::{Key, Value};
+use windows_registry::{Key, Type, Value};
 
 pub fn get_default_keys() -> [(&'static Key, &'static str); 5] {
     [
@@ -26,4 +26,23 @@ pub fn read_subkeys(key: &Key) -> Vec<String> {
 
 pub fn read_values(key: &Key) -> Vec<(String, Value)> {
     key.values().unwrap().collect()
+}
+
+pub fn get_printable_type(t: Type) -> &'static str {
+    match t {
+        Type::Bytes => "REG_BINARY",
+        Type::String => "REG_SZ",
+        Type::ExpandString => "REG_EXPAND_SZ",
+        Type::MultiString => "REG_MULTI_SZ",
+        Type::U32 => "REG_DWORD",
+        Type::U64 => "REG_QWORD",
+        Type::Other(_) => "REG_NONE",
+    }
+}
+
+pub fn get_printable_value(value: &Value) -> String {
+    match value.ty() {
+        Type::Bytes => "TODO".into(),
+        _ => "TODO".into(),
+    }
 }
