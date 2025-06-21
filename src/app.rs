@@ -10,6 +10,7 @@ const ITEM_HEIGHT: usize = 1;
 struct ScrollableTableState {
     state: TableState,
     scroll: ScrollbarState,
+    len: usize,
 }
 
 impl ScrollableTableState {
@@ -17,11 +18,15 @@ impl ScrollableTableState {
         Self {
             state: TableState::default().with_selected(0),
             scroll: ScrollbarState::new(content_length),
+            len: content_length,
         }
     }
 
     fn resize(&mut self, content_length: usize) {
+        self.state.select(Some(0));
         self.scroll = self.scroll.content_length(content_length);
+
+        self.len = content_length;
     }
 }
 
@@ -122,8 +127,17 @@ impl AppContext {
         };
 
         let entry = key_state.values_cache.entry(key_name.clone()).or_insert_with(|| {
-            let key = registry::read_key(&key_state.key, key_name.as_str());
-            registry::read_values(&key).into_iter().map(|(name, value)| NamedValue::new(name, value)).collect()
+            let key = match registry::read_key(&key_state.key, key_name.as_str()) {
+                Ok(key) => key,
+                Err(_) => return Vec::new(),
+            };
+
+            let values = registry::read_values(&key);
+            
+            match values {
+                Ok(values) => values.into_iter().map(|(name, value)| NamedValue::new(name, value)).collect(),
+                Err(_) => Vec::new(),
+            }
         });
 
         self.value_table.resize(entry.len() * ITEM_HEIGHT);
@@ -144,13 +158,20 @@ impl AppContext {
         key_state.values_cache.get(key_name)
     }
 
+    fn get_current_view_len(&self) -> usize {
+        match self.view_state {
+            ViewState::Keys => self.get_subkeys().len(),
+            ViewState::Values => self.get_values().map_or(0, |values| values.len()),
+        }
+    }
+
     fn next_row(&mut self) {
+        let max = self.get_current_view_len();
         let table = self.get_selected_table();
-        let max = 100; // temp
         
         let i = match table.state.selected() {
             Some(i) => {
-                if i > max {
+                if i >= max - 1 {
                     i
                 } else {
                     i + 1
@@ -197,7 +218,7 @@ impl AppContext {
     }
 
     fn create_subkeys(&self, key: &windows_registry::Key) -> Vec<String> {
-        let mut subkeys = registry::read_subkeys(key);
+        let mut subkeys = registry::read_subkeys(key).unwrap();
 
         // add subkey to go back
         subkeys.insert(0, "..".into());
@@ -227,7 +248,7 @@ impl AppContext {
                 let path = &self.get_subkeys()[index];
                 let current_state = self.key_states.last().unwrap();
 
-                let key = registry::read_key(&current_state.key, path);
+                let key = registry::read_key(&current_state.key, path).unwrap();
                 let subkeys = self.create_subkeys(&key);
                 let new_state = KeyState::new(key, path.to_owned(), subkeys, current_state.path_cache.clone());
 
@@ -237,12 +258,10 @@ impl AppContext {
     }
 
     fn select(&mut self) {
-        let i = self.key_table.state.selected();
-        if i.is_none() {
-            return;
-        }
-
-        let i = i.unwrap();
+        let i = match self.key_table.state.selected() {
+            Some(i) => i,
+            None => return,
+        };
 
         match self.get_key_view_state() {
             KeyViewState::Base => self.select_base(i),
@@ -323,11 +342,23 @@ impl App {
         Self::render_table(frame, header, rows, &mut self.context.key_table, is_disabled, area);
     }
 
+    fn render_empty_values(&mut self, frame: &mut Frame, area: Rect) {
+        let block = Block::bordered();
+        let paragraph = Paragraph::new("No Values to Display")
+            .centered()
+            .block(block);
+
+        frame.render_widget(paragraph, area);
+    }
+
     fn render_value_table(&mut self, frame: &mut Frame, area: Rect) {
         let header = ["Name", "Type", "Value"];
         let values = match self.context.get_values().cloned() {
             Some(values) => values,
-            None => return,
+            None => {
+                self.render_empty_values(frame, area);
+                return;
+            }
         };
 
         let rows = values.into_iter()
@@ -380,16 +411,22 @@ impl App {
             .header(header)
             .row_highlight_style(selected_style)
             .block(block);
-        let scrollbar = Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None);
 
         frame.render_stateful_widget(widget, area, &mut table.state);
-        frame.render_stateful_widget(
-            scrollbar,
-            area.inner(Margin { horizontal: 1, vertical: 1 }),
-            &mut table.scroll);
+
+        let content_height = table.len as u16;
+        let viewport_height = area.height;
+
+        if content_height > viewport_height {
+            let scrollbar = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None);
+            frame.render_stateful_widget(
+                scrollbar,
+                area.inner(Margin { horizontal: 1, vertical: 1 }),
+                &mut table.scroll);
+        }
     }
 
     fn render_main_area(&mut self, frame: &mut Frame, area: Rect) {
