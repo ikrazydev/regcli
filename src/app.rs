@@ -10,7 +10,8 @@ const ITEM_HEIGHT: usize = 1;
 struct ScrollableTableState {
     state: TableState,
     scroll: ScrollbarState,
-    len: usize,
+
+    content_length: usize,
 }
 
 impl ScrollableTableState {
@@ -18,7 +19,8 @@ impl ScrollableTableState {
         Self {
             state: TableState::default().with_selected(0),
             scroll: ScrollbarState::new(content_length),
-            len: content_length,
+
+            content_length,
         }
     }
 
@@ -26,7 +28,7 @@ impl ScrollableTableState {
         self.state.select(Some(0));
         self.scroll = self.scroll.content_length(content_length);
 
-        self.len = content_length;
+        self.content_length = content_length;
     }
 }
 
@@ -356,7 +358,7 @@ impl App {
     }
 
     fn render_value_table(&mut self, frame: &mut Frame, area: Rect) {
-        let header = ["Name", "Type", "Value"];
+        let header = ["Name", "Type", "Data"];
         let values = match self.context.get_values().cloned() {
             Some(values) => values,
             None => {
@@ -376,6 +378,11 @@ impl App {
                 )
             }
         );
+
+        if rows.len() == 0 {
+            self.render_empty_values(frame, area);
+            return;
+        }
 
         let is_disabled = self.context.view_state == ViewState::Values;
         Self::render_table(frame, header, rows, &mut self.context.value_table, is_disabled, area);
@@ -418,7 +425,7 @@ impl App {
 
         frame.render_stateful_widget(widget, area, &mut table.state);
 
-        let content_height = table.len as u16;
+        let content_height = table.content_length as u16;
         let viewport_height = area.height;
 
         if content_height > viewport_height {

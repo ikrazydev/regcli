@@ -39,9 +39,60 @@ pub fn get_printable_type(t: Type) -> &'static str {
     }
 }
 
+fn get_printable_binary(value: &Value) -> String {
+    value.iter().map(|byte| format!("{:02x}", byte)).collect::<Vec<String>>().join(" ")
+}
+
+fn get_printable_sz(value: &Value) -> String {
+    let wide = value.as_wide();
+    let wstr = match wide.iter().position(|&c| c == 0) {
+        Some(pos) => &wide[..pos],
+        None => wide,
+    };
+
+    String::from_utf16_lossy(wstr).to_string()
+}
+
+fn get_printable_multi_sz(value: &Value) -> String {
+    let mut strs = Vec::new();
+    let mut current = Vec::new();
+
+    for &u in value.as_wide() {
+        match u {
+            0 => {
+                if current.is_empty() {
+                    break;
+                }
+
+                strs.push(String::from_utf16_lossy(&current));
+                current.clear();
+            }
+            _ => current.push(u),
+        }
+    }
+
+    strs.join(" ").trim_end().to_string()
+}
+
+fn get_printable_u32(value: &Value) -> String {
+    let num = u32::from_le_bytes(*&value[..4].try_into().unwrap());
+
+    format!("{:#010x} ({})", num, num)
+}
+
+fn get_printable_u64(value: &Value) -> String {
+    let num = u64::from_le_bytes(*&value[..8].try_into().unwrap());
+
+    format!("{:#010x} ({})", num, num)
+}
+
 pub fn get_printable_value(value: &Value) -> String {
     match value.ty() {
-        Type::Bytes => "TODO".into(),
-        _ => "TODO".into(),
+        Type::Bytes => get_printable_binary(value),
+        Type::String | Type::ExpandString => get_printable_sz(value),
+        Type::MultiString => get_printable_multi_sz(value),
+        Type::U32 if value.len() >= 4 => get_printable_u32(value),
+        Type::U64 if value.len() >= 8 => get_printable_u64(value),
+        _ => "(unknown data)".into(),
     }
 }
