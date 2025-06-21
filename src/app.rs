@@ -167,6 +167,10 @@ impl AppContext {
 
     fn next_row(&mut self) {
         let max = self.get_current_view_len();
+        if max == usize::MIN {
+            return;
+        }
+
         let table = self.get_selected_table();
         
         let i = match table.state.selected() {
