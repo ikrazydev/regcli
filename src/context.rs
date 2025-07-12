@@ -5,14 +5,60 @@ use tui_textarea::TextArea;
 
 use crate::{app::ITEM_HEIGHT, registry};
 
+pub type InputValidateFn = dyn Fn(&str) -> Result<(), String>;
+pub type InputConfirmFn = dyn Fn(String) -> Option<AppMessage>;
+
 pub struct InputState {
     pub label: String,
     pub textarea: TextArea<'static>,
+
+    pub confirm: bool,
+
+    pub validate_fn: Option<Box<InputValidateFn>>,
+    pub confirm_fn: Option<Box<InputConfirmFn>>,
 }
 
 impl InputState {
     fn new() -> Self {
-        Self { label: String::new(), textarea: TextArea::default() }
+        Self { label: String::from("No Input Required"), textarea: TextArea::default(), confirm: false, validate_fn: None, confirm_fn: None }
+    }
+
+    pub fn text(&self) -> String {
+        self.textarea.lines().join("\n")
+    }
+
+    pub fn validate(&self) -> Option<Result<(), String>> {
+        let text = self.text();
+
+        match self.validate_fn {
+            Some(ref validate_fn) => Some((validate_fn)(text.as_str())),
+            None => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AppMessageType {
+    Info,
+    Error,
+}
+
+pub struct AppMessage {
+    pub ty: AppMessageType,
+    pub message: String,
+}
+
+impl AppMessage {
+    fn new(ty: AppMessageType, message: impl Into<String>) -> Self {
+        Self { ty, message: message.into() }
+    }
+
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::new(AppMessageType::Info, message)
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(AppMessageType::Error, message)
     }
 }
 
@@ -59,7 +105,7 @@ pub enum ViewState {
     Keys,
     Values,
     Input(LastSelected),
-    Error, // TODO
+    Message(LastSelected),
 }
 
 impl From<ViewState> for LastSelected {
@@ -86,6 +132,13 @@ impl ViewState {
     pub const fn is_input(&self) -> bool {
         match self {
             Self::Input(_) => true,
+            _ => false,
+        }
+    }
+
+    pub const fn is_message(&self) -> bool {
+        match self {
+            Self::Message(_) => true,
             _ => false,
         }
     }
@@ -123,6 +176,7 @@ pub struct AppContext {
     pub key_table: ScrollableTableState,
     pub value_table: ScrollableTableState,
     pub input: InputState,
+    pub message: Option<AppMessage>,
     pub view_state: ViewState,
 
     base_subkeys: Vec<String>,
@@ -138,6 +192,7 @@ impl AppContext {
             key_table: ScrollableTableState::new(base_subkeys.len() * ITEM_HEIGHT),
             value_table: ScrollableTableState::new(100 * ITEM_HEIGHT),
             input: InputState::new(),
+            message: None,
             view_state: ViewState::Keys,
 
             base_subkeys,
@@ -329,6 +384,29 @@ impl AppContext {
 
     pub fn set_input(&mut self) {
         self.view_state = ViewState::Input(self.view_state.into());
+        self.input.confirm = false;
+    }
+
+    pub fn set_confirm_input(&mut self, validate: Box<InputValidateFn>, confirm: Box<InputConfirmFn>) {
+        self.view_state = ViewState::Input(self.view_state.into());
+        self.input.confirm = true;
+        self.input.validate_fn = Some(validate);
+        self.input.confirm_fn = Some(confirm);
+
+        self.input.textarea.set_placeholder_text("<Esc> to cancel, <Enter> to confirm");
+    }
+
+    fn reset_input(&mut self) {
+        self.input.confirm = false;
+        self.input.validate_fn = None;
+        self.input.confirm_fn = None;
+
+        self.input.textarea.select_all();
+        self.input.textarea.cut();
+
+        self.input.textarea.set_placeholder_text("");
+
+        self.input.label = "No Input Required".into();
     }
 
     pub fn escape_input(&mut self) {
@@ -336,5 +414,85 @@ impl AppContext {
             ViewState::Input(last_selected) => last_selected.into(),
             _ => self.view_state,
         };
+
+        self.reset_input();
+    }
+
+    pub fn confirm_input(&mut self) {
+        if !self.input.confirm || self.input.validate().is_some_and(|res| res.is_err()) {
+            return;
+        }
+
+        let text = self.input.text();
+
+        match self.input.confirm_fn.as_ref() {
+            Some(confirm_fn) => {
+                let result = (confirm_fn)(text);
+                let last_selected = match self.view_state {
+                    ViewState::Input(last_selected) => last_selected,
+                    _ => LastSelected::None,
+                };
+
+                result.map(|result| self.set_message_with_state(result, last_selected));
+            }
+            None => (),
+        };
+
+        self.reset_input();
+    }
+
+    pub fn set_message_with_state(&mut self, message: AppMessage, last_selected: LastSelected) {
+        self.view_state = ViewState::Message(last_selected);
+        self.message = Some(message);
+    }
+
+    pub fn set_message(&mut self, message: AppMessage) {
+        self.set_message_with_state(message, self.view_state.into());
+    }
+
+    pub fn cancel_message(&mut self) {
+        self.view_state = match self.view_state {
+            ViewState::Message(last_selected) => last_selected.into(),
+            _ => self.view_state,
+        };
+
+        self.message = None;
+    }
+
+    pub fn create(&mut self) {
+        let validate = |text: &str| {
+            if text.trim().is_empty() {
+                return Err("Can't be empty".into());
+            }
+
+            Ok(())
+        };
+
+        let confirm = |text: String| {
+            if text.to_lowercase() == "error" {
+                Some(AppMessage::error("Confirmation Test: 'Create' error message test."))
+            } else {
+                Some(AppMessage::info("Confirmation Test: 'Create' confirmed."))
+            }
+        };
+
+        self.input.label = "Enter Name:".into();
+        self.set_confirm_input(Box::new(validate), Box::new(confirm));
+    }
+
+    pub fn rename(&mut self) {
+        todo!()
+    }
+
+    pub fn delete(&mut self) {
+        todo!()
+    }
+
+    pub fn change_type(&mut self) {
+        todo!()
+    }
+
+    pub fn change_data(&mut self) {
+        todo!()
     }
 }

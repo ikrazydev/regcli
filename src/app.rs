@@ -1,6 +1,6 @@
 use ratatui::{crossterm::event::{self, Event, KeyCode, KeyEventKind}, layout::{Constraint, Layout, Margin, Rect}, prelude::Backend, style::{Style, Stylize}, text::{Line, Span}, widgets::{Block, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table}, Frame, Terminal};
 
-use crate::{context::{AppContext, ScrollableTableState, ViewState}, registry};
+use crate::{context::{AppContext, AppMessageType, ScrollableTableState, ViewState}, registry};
 
 pub const ITEM_HEIGHT: usize = 1;
 
@@ -31,8 +31,18 @@ impl App {
         match event::read()? {
             Event::Key(event) => match event.code {
                 KeyCode::Esc if event.kind == KeyEventKind::Press => self.context.escape_input(),
+                KeyCode::Enter if event.kind == KeyEventKind::Press => self.context.confirm_input(),
                 _ => { self.context.input.textarea.input(event); }
             }
+            _ => (),
+        };
+
+        Ok(())
+    }
+
+    fn handle_message_input_events(&mut self) -> std::io::Result<()> {
+        match event::read()? {
+            Event::Key(event) if event.kind == KeyEventKind::Press => self.context.cancel_message(),
             _ => (),
         };
 
@@ -44,15 +54,26 @@ impl App {
             self.handle_input_events()?;
             return Ok(false);
         }
+        if self.context.view_state.is_message() {
+            self.handle_message_input_events()?;
+            return Ok(false);
+        }
 
         match event::read()? {
             Event::Key(event) if event.kind == KeyEventKind::Press => match event.code {
                 KeyCode::Esc => return Ok(true),
                 KeyCode::Char('j') | KeyCode::Char('J') => self.context.next_row(),
                 KeyCode::Char('k') | KeyCode::Char('K') => self.context.prev_row(),
-                KeyCode::Char('i') | KeyCode::Char('I') => self.context.set_input(),
                 KeyCode::Tab => self.context.switch_views(),
+                
                 KeyCode::Enter => self.context.select(),
+                KeyCode::Char('n') | KeyCode::Char('N') => self.context.create(),
+                KeyCode::Char('r') | KeyCode::Char('R') => self.context.rename(),
+                KeyCode::Char('d') | KeyCode::Char('D') => self.context.delete(),
+
+                KeyCode::Char('t') | KeyCode::Char('T') => self.context.change_type(),
+                KeyCode::Char('v') | KeyCode::Char('V') => self.context.change_data(),
+
                 _ => (),
             }
             _ => (),
@@ -212,32 +233,78 @@ impl App {
         }
     }
 
-    fn render_input(&mut self, frame: &mut Frame, area: Rect) {
-        if self.context.input.label.is_empty() {
-            self.context.input.label = "Enter Test Text: ".into();
-        }
+    fn render_message(&mut self, frame: &mut Frame, area: Rect) {
+        let message = match self.context.message.as_ref() {
+            Some(message) => message,
+            None => return,
+        };
 
-        let label_text = self.context.input.label.as_str();
+        let text = message.message.clone();
+        let text = text + " (Press any key to continue)";
+
+        let style = match message.ty {
+            AppMessageType::Info => Style::default().black().on_dark_gray(),
+            AppMessageType::Error => Style::default().white().on_red(),
+        };
+
+        let label = Paragraph::new(text)
+            .style(style)
+            .block(Block::bordered().style(style));
+
+        frame.render_widget(label, area);
+    }
+
+    fn render_input(&mut self, frame: &mut Frame, area: Rect) {
         let label_padding = 2;
+        let label_text = self.context.input.label.as_str();
 
         let layout = Layout::horizontal([Constraint::Length(label_text.len() as u16 + label_padding), Constraint::Min(0)]);
         let [label_area, input_area] = layout.areas(area);
 
-        self.context.input.textarea.set_block(Block::bordered());
-        self.context.input.textarea.set_style(Style::default());
+        let style = match self.context.view_state {
+            ViewState::Input(_) => Style::default(),
+            _ => Style::default().dark_gray(),
+        };
 
         let label = Paragraph::new(label_text)
-            .block(Block::bordered());
+            .block(Block::bordered().style(style))
+            .style(style);
+
+        let block = match self.context.input.validate() {
+            Some(Err(message)) => Block::bordered().red().title(message),
+            Some(Ok(())) | None => Block::bordered().style(style),
+        };
+
+        self.context.input.textarea.set_style(style);
+        self.context.input.textarea.set_block(block);
+
+        match self.context.view_state {
+            ViewState::Input(_) => {
+                self.context.input.textarea.set_cursor_style(Style::default().on_white());
+                self.context.input.textarea.set_cursor_line_style(Style::default().underlined());
+            }
+            _ => {
+                self.context.input.textarea.set_cursor_style(Style::default());
+                self.context.input.textarea.set_cursor_line_style(Style::default());
+            }
+        };
 
         frame.render_widget(label, label_area);
         frame.render_widget(&self.context.input.textarea, input_area);
+    }
+
+    fn render_footer(&mut self, frame: &mut Frame, area: Rect) {
+        match self.context.view_state {
+            ViewState::Message(_) => self.render_message(frame, area),
+            _ => self.render_input(frame, area),
+        };
     }
 
     fn render_status(&mut self, frame: &mut Frame, area: Rect) {
         use Constraint::{Min};
 
         let layout = Layout::vertical([Min(1), Min(3)]);
-        let [keybinds_area, input_area] = layout.areas(area);
+        let [keybinds_area, footer_area] = layout.areas(area);
 
         let mut keybinds = vec![
             " <Esc> ".black().on_white().bold(),
@@ -248,17 +315,13 @@ impl App {
             " Up ".into(),
             " <Tab> ".black().on_white().bold(),
             " Switch Views ".into(),
-            " <I> ".black().on_white().bold(),
-            " Test Input ".into(),
         ];
-
         keybinds.append(&mut self.get_additional_keybinds());
 
         let status = Line::from(keybinds);
-
         frame.render_widget(status, keybinds_area);
-        
-        self.render_input(frame, input_area);
+
+        self.render_footer(frame, footer_area);
     }
 
     fn draw(&mut self, frame: &mut Frame) {
