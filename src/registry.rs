@@ -96,3 +96,13 @@ pub fn get_printable_value(value: &Value) -> String {
         _ => "(unknown data)".into(),
     }
 }
+
+pub fn clone_key(key: &Key) -> Key {
+    key.open("").expect("Same key wasn't able to be cloned")
+}
+
+pub fn new_key(key: &Key, name: impl AsRef<str>) -> windows_registry::Result<()> {
+    key.create(name)?;
+
+    Ok(())
+}

@@ -6,7 +6,7 @@ use tui_textarea::TextArea;
 use crate::{app::ITEM_HEIGHT, registry};
 
 pub type InputValidateFn = dyn Fn(&str) -> Result<(), String>;
-pub type InputConfirmFn = dyn Fn(String) -> Option<AppMessage>;
+pub type InputConfirmFn = dyn Fn(String) -> (Option<AppMessage>, PostAction);
 
 pub struct InputState {
     pub label: String,
@@ -62,6 +62,15 @@ impl AppMessage {
     }
 }
 
+pub struct ActionAddSubkey {
+    pub name: String,
+}
+
+pub enum PostAction {
+    AddSubkey(ActionAddSubkey),
+    None,
+}
+
 pub struct ScrollableTableState {
     pub state: TableState,
     pub scroll: ScrollbarState,
@@ -113,7 +122,7 @@ impl From<ViewState> for LastSelected {
         match value {
             ViewState::Keys => LastSelected::Keys,
             ViewState::Values => LastSelected::Values,
-            _ => LastSelected::None,
+            _ => unreachable!(),
         }
     }
 }
@@ -123,7 +132,7 @@ impl From<LastSelected> for ViewState {
         match value {
             LastSelected::Keys => ViewState::Keys,
             LastSelected::Values => ViewState::Values,
-            LastSelected::None => ViewState::Keys, // default to keys
+            _ => unreachable!(),
         }
     }
 }
@@ -202,12 +211,16 @@ impl AppContext {
         }
     }
 
-    pub const fn get_selected_table(&mut self) -> Option<&mut ScrollableTableState> {
-        match self.view_state {
+    pub const fn get_table_by_view(&mut self, view: ViewState) -> Option<&mut ScrollableTableState> {
+        match view {
             ViewState::Keys => Some(&mut self.key_table),
             ViewState::Values => Some(&mut self.value_table),
             _ => None,
         }
+    }
+
+    pub const fn get_selected_table(&mut self) -> Option<&mut ScrollableTableState> {
+        self.get_table_by_view(self.view_state)
     }
 
     pub fn switch_views(&mut self) {
@@ -272,11 +285,8 @@ impl AppContext {
         len.saturating_sub(1)
     }
 
-    fn update_row_selection(&mut self, i: usize) {
-        let table = match self.get_selected_table() {
-            Some(table) => table,
-            None => return,
-        };
+    fn select_row_in(&mut self, view: ViewState, i: usize) {
+        let Some(table) = self.get_table_by_view(view) else { return; };
 
         table.state.select(Some(i));
         table.scroll = table.scroll.position(i * ITEM_HEIGHT);
@@ -284,6 +294,10 @@ impl AppContext {
         if self.view_state == ViewState::Keys {
             self.update_values();
         }
+    }
+
+    fn select_row_in_current(&mut self, i: usize) {
+        self.select_row_in(self.view_state, i);
     }
 
     pub fn next_row(&mut self) {
@@ -294,7 +308,7 @@ impl AppContext {
         };
         let i = table.state.selected().map_or(0, |i| i.saturating_add(1).min(max));
 
-        self.update_row_selection(i);
+        self.select_row_in_current(i);
     }
 
     pub fn prev_row(&mut self) {
@@ -304,7 +318,7 @@ impl AppContext {
         };
         let i = table.state.selected().map_or(0, |i| i.saturating_sub(1));
 
-        self.update_row_selection(i);
+        self.select_row_in_current(i);
     }
 
     fn get_key_view_state(&self) -> KeyViewState {
@@ -418,6 +432,16 @@ impl AppContext {
         self.reset_input();
     }
 
+    fn post_action_add_subkey(&mut self, name: String) {
+        let Some(last) = self.key_states.last_mut() else { unreachable!() };
+        let Err(index) = last.subkeys.binary_search_by(|s| s.cmp(&name)) else { unreachable!() };
+
+        last.subkeys.insert(index, name);
+
+        self.key_table.resize(last.subkeys.len() * ITEM_HEIGHT);
+        self.select_row_in(ViewState::Keys, index);
+    }
+
     pub fn confirm_input(&mut self) {
         if !self.input.confirm || self.input.validate().is_some_and(|res| res.is_err()) {
             return;
@@ -427,13 +451,18 @@ impl AppContext {
 
         match self.input.confirm_fn.as_ref() {
             Some(confirm_fn) => {
-                let result = (confirm_fn)(text);
+                let (message, action) = (confirm_fn)(text);
                 let last_selected = match self.view_state {
                     ViewState::Input(last_selected) => last_selected,
                     _ => LastSelected::None,
                 };
 
-                result.map(|result| self.set_message_with_state(result, last_selected));
+                message.map(|result| self.set_message_with_state(result, last_selected));
+
+                match action {
+                    PostAction::AddSubkey(ActionAddSubkey { name }) => self.post_action_add_subkey(name),
+                    PostAction::None => (),
+                };
             }
             None => (),
         };
@@ -459,20 +488,35 @@ impl AppContext {
         self.message = None;
     }
 
-    pub fn create(&mut self) {
-        let validate = |text: &str| {
-            if text.trim().is_empty() {
+    pub fn new_key(&mut self) {
+        let Some((key, subkeys)) = self.key_states.last()
+            .map(|s| (registry::clone_key(&s.key), s.subkeys.clone()))
+            else {
+                self.set_message(AppMessage::error("Can't create a key here."));
+                return;
+            };
+
+        let validate = move |input: &str| {
+            if input.trim().is_empty() {
                 return Err("Can't be empty".into());
+            }
+
+            let found_key = subkeys.iter().find(|a| *a.to_lowercase() == input.to_lowercase());
+            if let Some(_) = found_key {
+                return Err("This key already exists".into());
             }
 
             Ok(())
         };
 
-        let confirm = |text: String| {
-            if text.to_lowercase() == "error" {
-                Some(AppMessage::error("Confirmation Test: 'Create' error message test."))
-            } else {
-                Some(AppMessage::info("Confirmation Test: 'Create' confirmed."))
+        let confirm = move |input: String| {
+            match registry::new_key(&key, input.as_str()) {
+                Ok(()) => {
+                    (Some(AppMessage::info("New key successfully created.")), PostAction::AddSubkey(ActionAddSubkey { name: input }))
+                }
+                Err(err) => {
+                    (Some(AppMessage::error(format!("Error when creating a new key: {}", err.message()))), PostAction::None)
+                }
             }
         };
 
@@ -480,12 +524,40 @@ impl AppContext {
         self.set_confirm_input(Box::new(validate), Box::new(confirm));
     }
 
+    pub fn new_value(&mut self) {
+        todo!()
+    }
+
+    pub fn delete_key(&mut self) {
+        todo!()
+    }
+
+    pub fn delete_value(&mut self) {
+        todo!()
+    }
+
+    fn dispatch_by_view<F, G>(&mut self, on_keys: F, on_values: G)
+    where
+        F: FnOnce(&mut Self),
+        G: FnOnce(&mut Self),
+    {
+        match self.view_state {
+            ViewState::Keys => on_keys(self),
+            ViewState::Values => on_values(self),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn create(&mut self) {
+        self.dispatch_by_view(Self::new_key, Self::new_value);
+    }
+
     pub fn rename(&mut self) {
         todo!()
     }
 
     pub fn delete(&mut self) {
-        todo!()
+        self.dispatch_by_view(Self::delete_key, Self::delete_value);
     }
 
     pub fn change_type(&mut self) {
