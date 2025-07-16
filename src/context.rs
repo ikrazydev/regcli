@@ -66,8 +66,14 @@ pub struct ActionAddSubkey {
     pub name: String,
 }
 
+pub struct ActionRenameSubkey {
+    pub original: String,
+    pub new: String,
+}
+
 pub enum PostAction {
     AddSubkey(ActionAddSubkey),
+    RenameSubkey(ActionRenameSubkey),
     None,
 }
 
@@ -442,6 +448,13 @@ impl AppContext {
         self.select_row_in(ViewState::Keys, index);
     }
 
+    fn post_action_rename_subkey(&mut self, original: String, new: String) {
+        let Some(last) = self.key_states.last_mut() else { unreachable!() };
+        let Some(subkey_index) = last.subkeys.iter().position(|a| *a == original) else { unreachable!() };
+
+        last.subkeys[subkey_index] = new;
+    }
+
     pub fn confirm_input(&mut self) {
         if !self.input.confirm || self.input.validate().is_some_and(|res| res.is_err()) {
             return;
@@ -461,6 +474,7 @@ impl AppContext {
 
                 match action {
                     PostAction::AddSubkey(ActionAddSubkey { name }) => self.post_action_add_subkey(name),
+                    PostAction::RenameSubkey(ActionRenameSubkey { original, new }) => self.post_action_rename_subkey(original, new),
                     PostAction::None => (),
                 };
             }
@@ -488,6 +502,23 @@ impl AppContext {
         self.message = None;
     }
 
+    fn key_name_validator(input: &str, subkeys: &Vec<String>, exclude_keys: &Vec<String>) -> Result<(), String> {
+        if input.trim().is_empty() {
+            return Err("Can't be empty".into());
+        }
+        if input.len() > 255 {
+            return Err("Name of a key can't be longer than 255 characters".into());
+        }
+
+        let found_key = subkeys.iter().find(|a| *a.to_lowercase() == input.to_lowercase());
+        let is_excluded = exclude_keys.iter().any(|a| *a.to_lowercase() == input.to_lowercase());
+        if found_key.is_some() && !is_excluded {
+            return Err("This key already exists".into());
+        }
+
+        Ok(())
+    }
+
     pub fn new_key(&mut self) {
         let Some((key, subkeys)) = self.key_states.last()
             .map(|s| (registry::clone_key(&s.key), s.subkeys.clone()))
@@ -496,18 +527,8 @@ impl AppContext {
                 return;
             };
 
-        let validate = move |input: &str| {
-            if input.trim().is_empty() {
-                return Err("Can't be empty".into());
-            }
-
-            let found_key = subkeys.iter().find(|a| *a.to_lowercase() == input.to_lowercase());
-            if let Some(_) = found_key {
-                return Err("This key already exists".into());
-            }
-
-            Ok(())
-        };
+        let exclude = Vec::new();
+        let validate = move |input: &str| { Self::key_name_validator(input, &subkeys, &exclude) };
 
         let confirm = move |input: String| {
             match registry::new_key(&key, input.as_str()) {
@@ -525,6 +546,61 @@ impl AppContext {
     }
 
     pub fn new_value(&mut self) {
+        todo!()
+    }
+
+    fn truncate_name(s: impl AsRef<str>, max_len: usize, sides_len: usize) -> String {
+        assert!(max_len >= sides_len * 2);
+
+        let s = s.as_ref();
+        let len = s.len();
+
+        if len <= max_len {
+            return s.into();
+        }
+
+        let left = s.chars().take(sides_len).collect::<String>();
+        let right = s.chars().skip(len - sides_len).collect::<String>();
+
+        format!("{}...{}", left, right)
+    }
+
+    pub fn rename_key(&mut self) {
+        let Some((key, subkeys)) = self.key_states.last()
+        .map(|s| (registry::clone_key(&s.key), s.subkeys.clone()))
+        else {
+            self.set_message(AppMessage::error("Can't rename a key here."));
+            return;
+        };
+
+        let selection = self.key_table.state.selected().unwrap_or(0);
+        if selection == 0 {
+            self.set_message(AppMessage::error("No key selected."));
+            return;
+        }
+
+        let current_name = (&subkeys[selection]).to_owned();
+        let short_name = Self::truncate_name(current_name.as_str(), 10, 3);
+
+        let exclude = vec![current_name.clone()];
+        let validate = move |input: &str| { Self::key_name_validator(input, &subkeys, &exclude) };
+
+        let confirm = move |input: String| {
+            match registry::rename_key(&key, current_name.as_str(), input.as_str()) {
+                Ok(()) => {
+                    (Some(AppMessage::info("The key has been successfully renamed.")), PostAction::RenameSubkey(ActionRenameSubkey { original: current_name.clone(), new: input }))
+                }
+                Err(err) => {
+                    (Some(AppMessage::error(format!("Error when renaming the key: {}", err.message()))), PostAction::None)
+                }
+            }
+        };
+
+        self.input.label = format!("Enter New Name ({}):", short_name);
+        self.set_confirm_input(Box::new(validate), Box::new(confirm));
+    }
+
+    pub fn rename_value(&mut self) {
         todo!()
     }
 
@@ -553,7 +629,7 @@ impl AppContext {
     }
 
     pub fn rename(&mut self) {
-        todo!()
+        self.dispatch_by_view(Self::rename_key, Self::rename_value);
     }
 
     pub fn delete(&mut self) {

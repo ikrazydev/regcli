@@ -102,7 +102,13 @@ pub fn clone_key(key: &Key) -> Key {
 }
 
 pub fn new_key(key: &Key, name: impl AsRef<str>) -> windows_registry::Result<()> {
-    key.create(name)?;
+    key.create(name).map(|_| ())
+}
 
-    Ok(())
+pub fn rename_key(key: &Key, original: impl AsRef<str>, new: impl AsRef<str>) -> windows_registry::Result<()> {
+    key.rename(original, new).map(|_| ())
+}
+
+pub fn delete_key(key: &Key, name: impl AsRef<str>) -> windows_registry::Result<()> {
+    key.remove_tree(name).map(|_| ())
 }
