@@ -105,9 +105,14 @@ pub struct ActionRenameSubkey {
     pub new: String,
 }
 
+pub struct ActionDeleteSubkey {
+    pub name: String,
+}
+
 pub enum PostAction {
     AddSubkey(ActionAddSubkey),
     RenameSubkey(ActionRenameSubkey),
+    DeleteSubkey(ActionDeleteSubkey),
     None,
 }
 
@@ -506,6 +511,16 @@ impl AppContext {
         last.subkeys[subkey_index] = new;
     }
 
+    fn post_action_delete_subkey(&mut self, name: String) {
+        let Some(last) = self.key_states.last_mut() else { unreachable!() };
+        let Ok(index) = last.subkeys.binary_search_by(|s| s.cmp(&name)) else { unreachable!() };
+
+        last.subkeys.remove(index);
+
+        self.key_table.resize(last.subkeys.len() * ITEM_HEIGHT);
+        self.select_row_in(ViewState::Keys, index - 1);
+    }
+
     pub fn confirm_input(&mut self) {
         if self.input.validate().is_some_and(|res| res.is_err()) {
             return;
@@ -529,6 +544,7 @@ impl AppContext {
                 match action {
                     PostAction::AddSubkey(ActionAddSubkey { name }) => self.post_action_add_subkey(name),
                     PostAction::RenameSubkey(ActionRenameSubkey { original, new }) => self.post_action_rename_subkey(original, new),
+                    PostAction::DeleteSubkey(ActionDeleteSubkey { name }) => self.post_action_delete_subkey(name),
                     PostAction::None => (),
                 };
             }
@@ -689,7 +705,7 @@ impl AppContext {
 
             match registry::delete_key(&key, current_name.as_str()) {
                 Ok(()) => {
-                    (Some(AppMessage::info("The key has been successfully deleted.")), PostAction::None)
+                    (Some(AppMessage::info("The key has been successfully deleted.")), PostAction::DeleteSubkey(ActionDeleteSubkey { name: current_name.clone() }))
                 }
                 Err(err) => {
                     (Some(AppMessage::error(format!("Error when deleting the key: {}", err.message()))), PostAction::None)
