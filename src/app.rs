@@ -1,6 +1,6 @@
-use ratatui::{crossterm::event::{self, Event, KeyCode, KeyEventKind}, layout::{Constraint, Layout, Margin, Rect}, prelude::Backend, style::{Style, Stylize}, text::{Line, Span}, widgets::{Block, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table}, Frame, Terminal};
+use ratatui::{crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind}, layout::{Constraint, Layout, Margin, Rect}, prelude::Backend, style::{Style, Stylize}, text::{Line, Span}, widgets::{Block, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, Table}, Frame, Terminal};
 
-use crate::{context::{AppContext, AppMessageType, ScrollableTableState, ViewState}, registry};
+use crate::{context::{AppContext, AppMessageType, InputType, ScrollableTableState, ViewState}, registry};
 
 pub const ITEM_HEIGHT: usize = 1;
 
@@ -27,12 +27,34 @@ impl App {
         Ok(())
     }
 
+    fn handle_input_textarea_events(&mut self, event: KeyEvent) -> std::io::Result<()> {
+        self.context.input.textarea.input(event);
+        Ok(())
+    }
+
+    fn handle_input_choices_events(&mut self, event: KeyEvent) -> std::io::Result<()> {
+        if event.kind != KeyEventKind::Press { return Ok(()); }
+
+        match event.code {
+            KeyCode::Char('h') | KeyCode::Char('H') => self.context.prev_input_choice(),
+            KeyCode::Char('l') | KeyCode::Char('L') => self.context.next_input_choice(),
+
+            _ => (),
+        };
+
+        Ok(())
+    }
+
     fn handle_input_events(&mut self) -> std::io::Result<()> {
         match event::read()? {
             Event::Key(event) => match event.code {
-                KeyCode::Esc if event.kind == KeyEventKind::Press => self.context.escape_input(),
+                KeyCode::Esc if event.kind == KeyEventKind::Press => self.context.reset_input(),
                 KeyCode::Enter if event.kind == KeyEventKind::Press => self.context.confirm_input(),
-                _ => { self.context.input.textarea.input(event); }
+
+                _ => match self.context.input.ty {
+                    InputType::TextArea => self.handle_input_textarea_events(event)?,
+                    InputType::Choice(_) => self.handle_input_choices_events(event)?,
+                }
             }
             _ => (),
         };
@@ -254,22 +276,7 @@ impl App {
         frame.render_widget(label, area);
     }
 
-    fn render_input(&mut self, frame: &mut Frame, area: Rect) {
-        let label_padding = 2;
-        let label_text = self.context.input.label.as_str();
-
-        let layout = Layout::horizontal([Constraint::Length(label_text.len() as u16 + label_padding), Constraint::Min(0)]);
-        let [label_area, input_area] = layout.areas(area);
-
-        let style = match self.context.view_state {
-            ViewState::Input(_) => Style::default(),
-            _ => Style::default().dark_gray(),
-        };
-
-        let label = Paragraph::new(label_text)
-            .block(Block::bordered().style(style))
-            .style(style);
-
+    fn render_textarea(&mut self, frame: &mut Frame, area: Rect, style: Style) {
         let block = match self.context.input.validate() {
             Some(Err(message)) => Block::bordered().red().title(message),
             Some(Ok(())) | None => Block::bordered().style(style),
@@ -289,8 +296,54 @@ impl App {
             }
         };
 
+        frame.render_widget(&self.context.input.textarea, area);
+    }
+
+    fn render_choices(&mut self, frame: &mut Frame, area: Rect) {
+        let InputType::Choice(ref choices) = self.context.input.ty else { unreachable!() };
+
+        let selected = choices.choices[choices.selected].as_str();
+
+        let line = Line::from(vec![
+            "< ".into(),
+            selected.into(),
+            " >".into(),
+            " (<H> to go left, <L> to go right)".dark_gray(),
+        ]);
+
+        let label = Paragraph::new(line)
+            .block(Block::bordered());
+
+        frame.render_widget(label, area);
+    }
+
+    fn render_input(&mut self, frame: &mut Frame, area: Rect) {
+        let label_padding = 2;
+        let label_text = self.context.input.label.as_str();
+
+        let layout = Layout::horizontal([Constraint::Length(label_text.len() as u16 + label_padding), Constraint::Min(0)]);
+        let [label_area, input_area] = layout.areas(area);
+
+        let style = match self.context.view_state {
+            ViewState::Input(_) => Style::default(),
+            _ => Style::default().dark_gray(),
+        };
+
+        let label = Paragraph::new(label_text)
+            .block(Block::bordered().style(style))
+            .style(style);
+
         frame.render_widget(label, label_area);
-        frame.render_widget(&self.context.input.textarea, input_area);
+
+        match self.context.view_state {
+            ViewState::Input(_) => {
+                match self.context.input.ty {
+                    InputType::TextArea => self.render_textarea(frame, input_area, style),
+                    InputType::Choice(_) => self.render_choices(frame, input_area),
+                }
+            }
+            _ => self.render_textarea(frame, input_area, style),
+        };
     }
 
     fn render_footer(&mut self, frame: &mut Frame, area: Rect) {

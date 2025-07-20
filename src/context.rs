@@ -8,19 +8,53 @@ use crate::{app::ITEM_HEIGHT, registry};
 pub type InputValidateFn = dyn Fn(&str) -> Result<(), String>;
 pub type InputConfirmFn = dyn Fn(String) -> (Option<AppMessage>, PostAction);
 
+pub struct InputChoices {
+    pub choices: Vec<String>,
+    pub selected: usize,
+}
+
+impl InputChoices {
+    pub fn new(choices: Vec<impl Into<String>>) -> Self {
+        assert!(choices.len() > 0);
+
+        Self {
+            choices: choices.into_iter().map(|s| s.into()).collect(),
+            selected: 0,
+        }
+    }
+}
+
+pub enum InputType {
+    TextArea,
+    Choice(InputChoices),
+}
+
+impl InputType {
+    pub const fn is_textarea(&self) -> bool {
+        match self {
+            Self::TextArea => true,
+            _ => false,
+        }
+    }
+
+    pub const fn is_choice(&self) -> bool {
+        !self.is_textarea()
+    }
+}
+
 pub struct InputState {
     pub label: String,
     pub textarea: TextArea<'static>,
 
-    pub confirm: bool,
-
     pub validate_fn: Option<Box<InputValidateFn>>,
     pub confirm_fn: Option<Box<InputConfirmFn>>,
+
+    pub ty: InputType,
 }
 
 impl InputState {
     fn new() -> Self {
-        Self { label: String::from("No Input Required"), textarea: TextArea::default(), confirm: false, validate_fn: None, confirm_fn: None }
+        Self { label: String::from("No Input Required"), textarea: TextArea::default(), validate_fn: None, confirm_fn: None, ty: InputType::TextArea }
     }
 
     pub fn text(&self) -> String {
@@ -402,40 +436,59 @@ impl AppContext {
         }
     }
 
-    pub fn set_input(&mut self) {
+    fn set_input_state(&mut self, ty: InputType, validate_fn: Option<Box<InputValidateFn>>, confirm_fn: Option<Box<InputConfirmFn>>) {
         self.view_state = ViewState::Input(self.view_state.into());
-        self.input.confirm = false;
+
+        self.input.ty = ty;
+        self.input.validate_fn = validate_fn;
+        self.input.confirm_fn = confirm_fn;
     }
 
-    pub fn set_confirm_input(&mut self, validate: Box<InputValidateFn>, confirm: Box<InputConfirmFn>) {
-        self.view_state = ViewState::Input(self.view_state.into());
-        self.input.confirm = true;
-        self.input.validate_fn = Some(validate);
-        self.input.confirm_fn = Some(confirm);
+    pub fn set_textarea_input(&mut self, validate: Box<InputValidateFn>, confirm: Box<InputConfirmFn>) {
+        self.set_input_state(InputType::TextArea, Some(validate), Some(confirm));
 
         self.input.textarea.set_placeholder_text("<Esc> to cancel, <Enter> to confirm");
     }
 
-    fn reset_input(&mut self) {
-        self.input.confirm = false;
-        self.input.validate_fn = None;
-        self.input.confirm_fn = None;
-
-        self.input.textarea.select_all();
-        self.input.textarea.cut();
-
-        self.input.textarea.set_placeholder_text("");
-
-        self.input.label = "No Input Required".into();
+    pub fn set_choice_input(&mut self, choices: Vec<impl Into<String>>, confirm: Box<InputConfirmFn>) {
+        self.set_input_state(InputType::Choice(InputChoices::new(choices)), None, Some(confirm));
     }
 
-    pub fn escape_input(&mut self) {
+    pub fn next_input_choice(&mut self) {
+        let InputType::Choice(ref mut choices) = self.input.ty else { return; };
+        let len = choices.choices.len();
+
+        choices.selected = (choices.selected + 1) % len;
+    }
+
+    pub fn prev_input_choice(&mut self) {
+        let InputType::Choice(ref mut choices) = self.input.ty else { return; };
+        let len = choices.choices.len();
+
+        if choices.selected > 0 {
+            choices.selected -= 1;
+        } else {
+            choices.selected = len - 1;
+        }
+    }
+
+    pub fn reset_input(&mut self) {
         self.view_state = match self.view_state {
             ViewState::Input(last_selected) => last_selected.into(),
             _ => self.view_state,
         };
 
-        self.reset_input();
+        self.input.validate_fn = None;
+        self.input.confirm_fn = None;
+
+        if self.input.ty.is_textarea() {
+            self.input.textarea.select_all();
+            self.input.textarea.cut();
+
+            self.input.textarea.set_placeholder_text("");
+        }
+
+        self.input.label = "No Input Required".into();
     }
 
     fn post_action_add_subkey(&mut self, name: String) {
@@ -456,11 +509,14 @@ impl AppContext {
     }
 
     pub fn confirm_input(&mut self) {
-        if !self.input.confirm || self.input.validate().is_some_and(|res| res.is_err()) {
+        if self.input.validate().is_some_and(|res| res.is_err()) {
             return;
         }
 
-        let text = self.input.text();
+        let text = match self.input.ty {
+            InputType::TextArea => self.input.text(),
+            InputType::Choice(ref choices) => choices.choices[choices.selected].clone(),
+        };
 
         match self.input.confirm_fn.as_ref() {
             Some(confirm_fn) => {
@@ -506,6 +562,9 @@ impl AppContext {
         if input.trim().is_empty() {
             return Err("Can't be empty".into());
         }
+        if input.contains('/') {
+            return Err("Name of a key can't contain forward slashes".into());
+        }
         if input.len() > 255 {
             return Err("Name of a key can't be longer than 255 characters".into());
         }
@@ -542,7 +601,7 @@ impl AppContext {
         };
 
         self.input.label = "Enter Name:".into();
-        self.set_confirm_input(Box::new(validate), Box::new(confirm));
+        self.set_textarea_input(Box::new(validate), Box::new(confirm));
     }
 
     pub fn new_value(&mut self) {
@@ -583,7 +642,12 @@ impl AppContext {
         let short_name = Self::truncate_name(current_name.as_str(), 10, 3);
 
         let exclude = vec![current_name.clone()];
-        let validate = move |input: &str| { Self::key_name_validator(input, &subkeys, &exclude) };
+        let validate = move |input: &str| {
+            if input == exclude[0] {
+                return Err("The name of the key must be new".into());
+            }
+            Self::key_name_validator(input, &subkeys, &exclude)
+        };
 
         let confirm = move |input: String| {
             match registry::rename_key(&key, current_name.as_str(), input.as_str()) {
@@ -597,7 +661,7 @@ impl AppContext {
         };
 
         self.input.label = format!("Enter New Name ({}):", short_name);
-        self.set_confirm_input(Box::new(validate), Box::new(confirm));
+        self.set_textarea_input(Box::new(validate), Box::new(confirm));
     }
 
     pub fn rename_value(&mut self) {
@@ -605,7 +669,38 @@ impl AppContext {
     }
 
     pub fn delete_key(&mut self) {
-        todo!()
+        let Some((key, subkeys)) = self.key_states.last()
+            .map(|s| (registry::clone_key(&s.key), s.subkeys.clone()))
+            else {
+                self.set_message(AppMessage::error("Can't delete a key here."));
+                return;
+            };
+
+        let selection = self.key_table.state.selected().unwrap_or(0);
+        if selection == 0 {
+            self.set_message(AppMessage::error("No key selected."));
+            return;
+        }
+
+        let current_name = (&subkeys[selection]).to_owned();
+
+        let confirm = move |text: String| {
+            if text == "No" {
+                return (None, PostAction::None);
+            }
+
+            match registry::delete_key(&key, current_name.as_str()) {
+                Ok(()) => {
+                    (Some(AppMessage::info("The key has been successfully deleted.")), PostAction::None)
+                }
+                Err(err) => {
+                    (Some(AppMessage::error(format!("Error when deleting the key: {}", err.message()))), PostAction::None)
+                }
+            }
+        };
+
+        self.input.label = "Confirm Delete:".into();
+        self.set_choice_input(vec!["No", "Yes"], Box::new(confirm));
     }
 
     pub fn delete_value(&mut self) {
