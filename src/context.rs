@@ -9,16 +9,16 @@ pub type InputValidateFn = dyn Fn(&str) -> Result<(), String>;
 pub type InputConfirmFn = dyn Fn(String) -> (Option<AppMessage>, PostAction);
 
 pub struct InputChoices {
-    pub choices: Vec<String>,
+    pub items: Vec<String>,
     pub selected: usize,
 }
 
 impl InputChoices {
-    pub fn new(choices: Vec<impl Into<String>>) -> Self {
-        assert!(choices.len() > 0);
+    pub fn new(items: Vec<impl Into<String>>) -> Self {
+        assert!(items.len() > 0);
 
         Self {
-            choices: choices.into_iter().map(|s| s.into()).collect(),
+            items: items.into_iter().map(|s| s.into()).collect(),
             selected: 0,
         }
     }
@@ -209,15 +209,15 @@ struct KeyState {
     key: windows_registry::Key,
     subkeys: Vec<String>,
 
-    path_cache: String,
-    values_cache: HashMap<String, Vec<NamedValue>>,
+    cached_path: String,
+    cached_values: HashMap<String, Vec<NamedValue>>,
 }
 
 impl KeyState {
     fn new(key: windows_registry::Key, name: String, subkeys: Vec<String>, last_path: String) -> Self {
         let new_path = format!("{last_path} -> {name}");
 
-        Self { key, subkeys, path_cache: new_path, values_cache: HashMap::new() }
+        Self { key, subkeys, cached_path: new_path, cached_values: HashMap::new() }
     }
 }
 
@@ -226,10 +226,12 @@ pub struct AppContext {
     pub value_table: ScrollableTableState,
     pub input: InputState,
     pub message: Option<AppMessage>,
+
     pub view_state: ViewState,
 
     base_subkeys: Vec<String>,
     base_path: &'static str,
+
     key_states: Vec<KeyState>,
 }
 
@@ -263,7 +265,7 @@ impl AppContext {
         self.get_table_by_view(self.view_state)
     }
 
-    pub fn switch_views(&mut self) {
+    pub fn swap_viewing_table(&mut self) {
         self.view_state = match self.view_state {
             ViewState::Keys => ViewState::Values,
             ViewState::Values => ViewState::Keys,
@@ -283,7 +285,7 @@ impl AppContext {
             None => return,
         };
 
-        let entry = key_state.values_cache.entry(key_name.clone()).or_insert_with(|| {
+        let entry = key_state.cached_values.entry(key_name.clone()).or_insert_with(|| {
             let key = match registry::read_key(&key_state.key, key_name.as_str()) {
                 Ok(key) => key,
                 Err(_) => return Vec::new(),
@@ -312,7 +314,7 @@ impl AppContext {
             None => return None,
         };
 
-        key_state.values_cache.get(key_name)
+        key_state.cached_values.get(key_name)
     }
 
     fn get_current_view_max(&self) -> usize {
@@ -401,7 +403,7 @@ impl AppContext {
 
                 let key = registry::read_key(&current_state.key, path).unwrap();
                 let subkeys = self.create_subkeys(&key);
-                let new_state = KeyState::new(key, path.to_owned(), subkeys, current_state.path_cache.clone());
+                let new_state = KeyState::new(key, path.to_owned(), subkeys, current_state.cached_path.clone());
 
                 self.key_states.push(new_state);
             }
@@ -425,7 +427,7 @@ impl AppContext {
     pub fn get_path(&self) -> &str {
         match self.get_key_view_state() {
             KeyViewState::Base => self.base_path,
-            KeyViewState::Subkey => self.key_states.last().unwrap().path_cache.as_str(),
+            KeyViewState::Subkey => self.key_states.last().unwrap().cached_path.as_str(),
         }
     }
 
@@ -456,20 +458,16 @@ impl AppContext {
 
     pub fn next_input_choice(&mut self) {
         let InputType::Choice(ref mut choices) = self.input.ty else { return; };
-        let len = choices.choices.len();
+        let len = choices.items.len();
 
         choices.selected = (choices.selected + 1) % len;
     }
 
     pub fn prev_input_choice(&mut self) {
         let InputType::Choice(ref mut choices) = self.input.ty else { return; };
-        let len = choices.choices.len();
+        let len = choices.items.len();
 
-        if choices.selected > 0 {
-            choices.selected -= 1;
-        } else {
-            choices.selected = len - 1;
-        }
+        choices.selected = (choices.selected + len - 1) % len;
     }
 
     pub fn reset_input(&mut self) {
@@ -515,7 +513,7 @@ impl AppContext {
 
         let text = match self.input.ty {
             InputType::TextArea => self.input.text(),
-            InputType::Choice(ref choices) => choices.choices[choices.selected].clone(),
+            InputType::Choice(ref choices) => choices.items[choices.selected].clone(),
         };
 
         match self.input.confirm_fn.as_ref() {
@@ -608,8 +606,8 @@ impl AppContext {
         todo!()
     }
 
-    fn truncate_name(s: impl AsRef<str>, max_len: usize, sides_len: usize) -> String {
-        assert!(max_len >= sides_len * 2);
+    fn truncate_name(s: impl AsRef<str>, max_len: usize, sides_size: usize) -> String {
+        assert!(max_len >= sides_size * 2);
 
         let s = s.as_ref();
         let len = s.len();
@@ -618,8 +616,8 @@ impl AppContext {
             return s.into();
         }
 
-        let left = s.chars().take(sides_len).collect::<String>();
-        let right = s.chars().skip(len - sides_len).collect::<String>();
+        let left = s.chars().take(sides_size).collect::<String>();
+        let right = s.chars().skip(len - sides_size).collect::<String>();
 
         format!("{}...{}", left, right)
     }

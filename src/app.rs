@@ -86,7 +86,7 @@ impl App {
                 KeyCode::Esc => return Ok(true),
                 KeyCode::Char('j') | KeyCode::Char('J') => self.context.next_row(),
                 KeyCode::Char('k') | KeyCode::Char('K') => self.context.prev_row(),
-                KeyCode::Tab => self.context.switch_views(),
+                KeyCode::Tab => self.context.swap_viewing_table(),
                 
                 KeyCode::Enter => self.context.select(),
                 KeyCode::Char('n') | KeyCode::Char('N') => self.context.create(),
@@ -302,7 +302,7 @@ impl App {
     fn render_choices(&mut self, frame: &mut Frame, area: Rect) {
         let InputType::Choice(ref choices) = self.context.input.ty else { unreachable!() };
 
-        let selected = choices.choices[choices.selected].as_str();
+        let selected = choices.items[choices.selected].as_str();
 
         let line = Line::from(vec![
             "< ".into(),
