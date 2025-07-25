@@ -109,10 +109,26 @@ pub struct ActionDeleteSubkey {
     pub name: String,
 }
 
+pub enum InputStageType {
+    NewValueType,
+    NewValueData,
+}
+
+pub struct StageNewValueData {
+    pub ty: windows_registry::Type,
+}
+
+pub struct ActionStage {
+    pub ty: InputStageType,
+}
+
 pub enum PostAction {
     AddSubkey(ActionAddSubkey),
     RenameSubkey(ActionRenameSubkey),
     DeleteSubkey(ActionDeleteSubkey),
+
+    Stage(ActionStage),
+
     None,
 }
 
@@ -242,7 +258,7 @@ pub struct AppContext {
 
 impl AppContext {
     pub fn new() -> Self {
-        let base_subkeys: Vec<String> = Vec::from(registry::get_default_keys().map(|(_, name)| name.into()));
+        let base_subkeys: Vec<String> = Vec::from(registry::DEFAULT_KEYS.map(|(_, name)| name.into()));
 
         Self {
             key_table: ScrollableTableState::new(base_subkeys.len() * ITEM_HEIGHT),
@@ -387,7 +403,7 @@ impl AppContext {
     fn select_base(&mut self, index: usize) {
         let path = &self.base_subkeys[index];
 
-        let default = registry::get_default_keys();
+        let default = registry::DEFAULT_KEYS;
         let (key, name) = default.iter().find(|(_, s)| *s == path).unwrap();
 
         let subkeys = self.create_subkeys(key);
@@ -521,6 +537,12 @@ impl AppContext {
         self.select_row_in(ViewState::Keys, index - 1);
     }
 
+    fn post_action_new_key_type(&mut self, ty: windows_registry::Type) {
+        let Some((state, subkey)) = self.get_selected_subkey() else { unreachable!() };
+
+        self.input.label = "Enter Value:".into();
+    }
+
     pub fn confirm_input(&mut self) {
         if self.input.validate().is_some_and(|res| res.is_err()) {
             return;
@@ -545,6 +567,9 @@ impl AppContext {
                     PostAction::AddSubkey(ActionAddSubkey { name }) => self.post_action_add_subkey(name),
                     PostAction::RenameSubkey(ActionRenameSubkey { original, new }) => self.post_action_rename_subkey(original, new),
                     PostAction::DeleteSubkey(ActionDeleteSubkey { name }) => self.post_action_delete_subkey(name),
+
+                    PostAction::Stage(_) => (),
+
                     PostAction::None => (),
                 };
             }
@@ -592,6 +617,19 @@ impl AppContext {
         Ok(())
     }
 
+    fn value_name_validator(input: &str, values: &Vec<NamedValue>, exclude_values: &Vec<NamedValue>) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn get_selected_subkey(&self) -> Option<(&KeyState, &String)> {
+        let selected = self.key_table.state.selected()?;
+        let state = self.key_states.last()?;
+
+        let subkey = state.subkeys.get(selected)?;
+
+        Some((state, subkey))
+    }
+
     pub fn new_key(&mut self) {
         let Some((key, subkeys)) = self.key_states.last()
             .map(|s| (registry::clone_key(&s.key), s.subkeys.clone()))
@@ -619,7 +657,18 @@ impl AppContext {
     }
 
     pub fn new_value(&mut self) {
-        todo!()
+        if let None = self.get_selected_subkey() {
+            self.set_message(AppMessage::info("No key selected."));
+            return;
+        };
+
+        let confirm = move |input: String| {
+            let ty = registry::str_to_type(input.as_ref());
+            (None, PostAction::None)
+        };
+
+        self.input.label = "Choose Type:".into();
+        self.set_choice_input(registry::get_type_choices_vec(), Box::new(confirm));
     }
 
     fn truncate_name(s: impl AsRef<str>, max_len: usize, sides_size: usize) -> String {
@@ -717,6 +766,14 @@ impl AppContext {
         self.set_choice_input(vec!["No", "Yes"], Box::new(confirm));
     }
 
+    pub fn change_type(&mut self) {
+        todo!()
+    }
+
+    pub fn change_data(&mut self) {
+        todo!()
+    }
+
     pub fn delete_value(&mut self) {
         todo!()
     }
@@ -743,13 +800,5 @@ impl AppContext {
 
     pub fn delete(&mut self) {
         self.dispatch_by_view(Self::delete_key, Self::delete_value);
-    }
-
-    pub fn change_type(&mut self) {
-        todo!()
-    }
-
-    pub fn change_data(&mut self) {
-        todo!()
     }
 }

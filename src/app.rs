@@ -147,7 +147,7 @@ impl App {
         let rows = values.into_iter()
             .map(|v| {
                 let name = v.name.clone();
-                let ty = registry::get_printable_type(v.value.ty()).to_owned();
+                let ty = registry::type_to_str(v.value.ty()).to_owned();
                 let value = registry::get_printable_value(&v.value);
 
                 Row::new(

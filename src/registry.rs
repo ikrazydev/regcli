@@ -1,13 +1,32 @@
 use windows_registry::{Key, Type, Value};
 
-pub fn get_default_keys() -> [(&'static Key, &'static str); 5] {
-    [
-        (windows_registry::CLASSES_ROOT, "HKEY_CLASSES_ROOT"),
-        (windows_registry::CURRENT_USER, "HKEY_CURRENT_USER"),
-        (windows_registry::LOCAL_MACHINE, "HKEY_LOCAL_MACHINE"),
-        (windows_registry::USERS, "HKEY_USERS"),
-        (windows_registry::CURRENT_CONFIG, "HKEY_CURRENT_CONFIG")
-    ]
+pub const DEFAULT_KEYS: [(&'static Key, &'static str); 5] = [
+    (windows_registry::CLASSES_ROOT, "HKEY_CLASSES_ROOT"),
+    (windows_registry::CURRENT_USER, "HKEY_CURRENT_USER"),
+    (windows_registry::LOCAL_MACHINE, "HKEY_LOCAL_MACHINE"),
+    (windows_registry::USERS, "HKEY_USERS"),
+    (windows_registry::CURRENT_CONFIG, "HKEY_CURRENT_CONFIG")
+];
+
+pub const TYPE_STRINGS: [&str; 7] = [
+    "REG_BINARY",
+    "REG_SZ",
+    "REG_EXPAND_SZ",
+    "REG_MULTI_SZ",
+    "REG_DWORD",
+    "REG_QWORD",
+    "REG_NONE",
+];
+
+pub fn get_type_strings_vec() -> Vec<String> {
+    TYPE_STRINGS.iter().map(|&s| s.to_string()).collect()
+}
+
+pub fn get_type_choices_vec() -> Vec<String> {
+    TYPE_STRINGS[..TYPE_STRINGS.len()-1]
+        .iter()
+        .map(|&s| s.to_string())
+        .collect()
 }
 
 pub fn read_key(key: &Key, path: &str) -> windows_registry::Result<Key> {
@@ -23,11 +42,27 @@ pub fn read_subkeys(key: &Key) -> windows_registry::Result<Vec<String>> {
     key.keys().map(|keys| keys.collect())
 }
 
+pub fn clone_key(key: &Key) -> Key {
+    key.open("").expect("Same key wasn't able to be cloned")
+}
+
+pub fn new_key(key: &Key, name: impl AsRef<str>) -> windows_registry::Result<()> {
+    key.create(name).map(|_| ())
+}
+
+pub fn rename_key(key: &Key, original: impl AsRef<str>, new: impl AsRef<str>) -> windows_registry::Result<()> {
+    key.rename(original, new).map(|_| ())
+}
+
+pub fn delete_key(key: &Key, name: impl AsRef<str>) -> windows_registry::Result<()> {
+    key.remove_tree(name).map(|_| ())
+}
+
 pub fn read_values(key: &Key) -> windows_registry::Result<Vec<(String, Value)>> {
     key.values().map(|values| values.collect())
 }
 
-pub fn get_printable_type(t: Type) -> &'static str {
+pub fn type_to_str(t: Type) -> &'static str {
     match t {
         Type::Bytes => "REG_BINARY",
         Type::String => "REG_SZ",
@@ -36,6 +71,19 @@ pub fn get_printable_type(t: Type) -> &'static str {
         Type::U32 => "REG_DWORD",
         Type::U64 => "REG_QWORD",
         Type::Other(_) => "REG_NONE",
+    }
+}
+
+pub fn str_to_type(s: &str) -> Type {
+    match s {
+        "REG_BINARY" => Type::Bytes,
+        "REG_SZ" => Type::String,
+        "REG_EXPAND_SZ" => Type::ExpandString,
+        "REG_MULTI_SZ" => Type::MultiString,
+        "REG_DWORD" => Type::U32,
+        "REG_QWORD" => Type::U64,
+        "REG_NONE" => Type::Other(0),
+        _ => Type::Other(0),
     }
 }
 
@@ -97,18 +145,19 @@ pub fn get_printable_value(value: &Value) -> String {
     }
 }
 
-pub fn clone_key(key: &Key) -> Key {
-    key.open("").expect("Same key wasn't able to be cloned")
+pub fn validate_value_data(ty: windows_registry::Type, value: &str) -> Result<(), ()> {
+    Ok(())
 }
 
-pub fn new_key(key: &Key, name: impl AsRef<str>) -> windows_registry::Result<()> {
-    key.create(name).map(|_| ())
-}
+pub fn set_value(key: &Key, name: impl AsRef<str>, ty: windows_registry::Type, value: &str) -> Result<(), ()> {
+    match ty {
+        Type::Bytes => (),
+        Type::String | Type::ExpandString => (),
+        Type::MultiString => (),
+        Type::U32 => (),
+        Type::U64 => (),
+        _ => (),
+    };
 
-pub fn rename_key(key: &Key, original: impl AsRef<str>, new: impl AsRef<str>) -> windows_registry::Result<()> {
-    key.rename(original, new).map(|_| ())
-}
-
-pub fn delete_key(key: &Key, name: impl AsRef<str>) -> windows_registry::Result<()> {
-    key.remove_tree(name).map(|_| ())
+    Ok(())
 }
