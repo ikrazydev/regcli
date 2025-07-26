@@ -3,7 +3,7 @@ use std::{collections::HashMap, usize};
 use ratatui::widgets::{ScrollbarState, TableState};
 use tui_textarea::TextArea;
 
-use crate::{app::ITEM_HEIGHT, registry};
+use crate::{app::ITEM_HEIGHT, registry::{self, ValueParserError}};
 
 pub type InputValidateFn = dyn Fn(&str) -> Result<(), String>;
 pub type InputConfirmFn = dyn Fn(String) -> (Option<AppMessage>, PostAction);
@@ -565,8 +565,16 @@ impl AppContext {
     }
 
     fn input_stage_new_value_data(&mut self, stage: StageNewValueData) {
+        let validator = registry::get_value_validator(stage.ty);
+
         let validate = move |input: &str| {
-            Ok(())
+            match (*validator).validate(input) {
+                Ok(()) => Ok(()),
+                Err(err) => match err {
+                    ValueParserError::U32Error(err) => Err(format!("{}", err)),
+                    ValueParserError::U64Error(err) => Err(format!("{}", err)),
+                }
+            }
         };
 
         let confirm = move |input: String| {

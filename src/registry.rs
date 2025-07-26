@@ -1,3 +1,5 @@
+use std::num::ParseIntError;
+
 use windows_registry::{Key, Type, Value};
 
 pub const DEFAULT_KEYS: [(&'static Key, &'static str); 5] = [
@@ -145,8 +147,164 @@ pub fn get_printable_value(value: &Value) -> String {
     }
 }
 
-pub fn validate_value_data(ty: windows_registry::Type, value: &str) -> Result<(), ()> {
-    Ok(())
+pub enum ValueParserError {
+    U32Error(ParseIntError),
+    U64Error(ParseIntError),
+}
+
+pub trait ValueValidator {
+    fn validate(&self, s: &str) -> Result<(), ValueParserError>;
+}
+
+pub trait ValueParser {
+    type ParserResult;
+
+    fn parse(&self, s: &str) -> Result<Self::ParserResult, ValueParserError>;
+}
+
+pub struct ValueBytesParser { }
+
+impl ValueBytesParser {
+    pub fn new() -> Self {
+        Self { }
+    }
+}
+
+impl ValueValidator for ValueBytesParser {
+    fn validate(&self, _: &str) -> Result<(), ValueParserError> {
+        todo!()
+    }
+}
+
+impl ValueParser for ValueBytesParser {
+    type ParserResult = String;
+
+    fn parse(&self, s: &str) -> Result<Self::ParserResult, ValueParserError> {
+        todo!()
+    }
+}
+
+pub struct ValueStringParser { }
+
+impl ValueStringParser {
+    pub fn new() -> Self {
+        Self { }
+    }
+}
+
+impl ValueValidator for ValueStringParser {
+    fn validate(&self, _: &str) -> Result<(), ValueParserError> {
+        Ok(())
+    }
+}
+
+impl ValueParser for ValueStringParser {
+    type ParserResult = String;
+
+    fn parse(&self, s: &str) -> Result<Self::ParserResult, ValueParserError> {
+        Ok(s.to_string())
+    }
+}
+
+pub struct ValueMultistringParser { }
+
+impl ValueMultistringParser {
+    pub fn new() -> Self {
+        Self { }
+    }
+}
+
+impl ValueValidator for ValueMultistringParser {
+    fn validate(&self, _: &str) -> Result<(), ValueParserError> {
+        todo!()
+    }
+}
+
+impl ValueParser for ValueMultistringParser {
+    type ParserResult = Vec<String>;
+
+    fn parse(&self, s: &str) -> Result<Self::ParserResult, ValueParserError> {
+        todo!()
+    }
+}
+
+pub struct ValueU32Parser { }
+
+impl ValueU32Parser {
+    pub fn new() -> Self {
+        Self { }
+    }
+}
+
+impl ValueValidator for ValueU32Parser {
+    fn validate(&self, s: &str) -> Result<(), ValueParserError> {
+        self.parse(s).map(|_| ())
+    }
+}
+
+impl ValueParser for ValueU32Parser {
+    type ParserResult = u32;
+
+    fn parse(&self, s: &str) -> Result<Self::ParserResult, ValueParserError> {
+        let s = s.trim().to_lowercase();
+
+        let result = if let Some(hex) = s.strip_prefix("0x") {
+            u32::from_str_radix(hex, 16)
+        } else if let Some(octal) = s.strip_prefix("0o") {
+            u32::from_str_radix(octal, 8)
+        } else if let Some(binary) = s.strip_prefix("0b") {
+            u32::from_str_radix(binary, 2)
+        } else {
+            u32::from_str_radix(&s, 10)
+        };
+        
+        result.map_err(|err| ValueParserError::U32Error(err))
+    }
+}
+
+pub struct ValueU64Parser { }
+
+impl ValueU64Parser {
+    pub fn new() -> Self {
+        Self { }
+    }
+}
+
+impl ValueValidator for ValueU64Parser {
+    fn validate(&self, s: &str) -> Result<(), ValueParserError> {
+        self.parse(s).map(|_| ())
+    }
+}
+
+impl ValueParser for ValueU64Parser {
+    type ParserResult = u64;
+
+    fn parse(&self, s: &str) -> Result<Self::ParserResult, ValueParserError> {
+        let s = s.trim().to_lowercase();
+
+        let result = if let Some(hex) = s.strip_prefix("0x") {
+            u64::from_str_radix(hex, 16)
+        } else if let Some(octal) = s.strip_prefix("0o") {
+            u64::from_str_radix(octal, 8)
+        } else if let Some(binary) = s.strip_prefix("0b") {
+            u64::from_str_radix(binary, 2)
+        } else {
+            u64::from_str_radix(&s, 10)
+        };
+        
+        result.map_err(|err| ValueParserError::U64Error(err))
+    }
+}
+
+pub fn get_value_validator(ty: windows_registry::Type) -> Box<dyn ValueValidator> {
+    match ty {
+        Type::Bytes => Box::new(ValueBytesParser::new()),
+        Type::String | Type::ExpandString => Box::new(ValueStringParser::new()),
+        Type::MultiString => Box::new(ValueMultistringParser::new()),
+        Type::U32 => Box::new(ValueU32Parser::new()),
+        Type::U64 => Box::new(ValueU64Parser::new()),
+        _ => unreachable!(),
+    }
 }
 
 pub fn set_value(key: &Key, name: impl AsRef<str>, ty: windows_registry::Type, value: &str) -> Result<(), ()> {
