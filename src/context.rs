@@ -109,13 +109,18 @@ pub struct ActionDeleteSubkey {
     pub name: String,
 }
 
-pub enum InputStageType {
-    NewValueType,
-    NewValueData,
+pub struct StageNewValueType {
+    pub name: String,
 }
 
 pub struct StageNewValueData {
+    pub name: String,
     pub ty: windows_registry::Type,
+}
+
+pub enum InputStageType {
+    NewValueType(StageNewValueType),
+    NewValueData(StageNewValueData),
 }
 
 pub struct ActionStage {
@@ -460,7 +465,10 @@ impl AppContext {
     }
 
     fn set_input_state(&mut self, ty: InputType, validate_fn: Option<Box<InputValidateFn>>, confirm_fn: Option<Box<InputConfirmFn>>) {
-        self.view_state = ViewState::Input(self.view_state.into());
+        self.view_state = match self.view_state {
+            ViewState::Input(_) => self.view_state,
+            _ => ViewState::Input(self.view_state.into()),
+        };
 
         self.input.ty = ty;
         self.input.validate_fn = validate_fn;
@@ -469,6 +477,9 @@ impl AppContext {
 
     pub fn set_textarea_input(&mut self, validate: Box<InputValidateFn>, confirm: Box<InputConfirmFn>) {
         self.set_input_state(InputType::TextArea, Some(validate), Some(confirm));
+
+        self.input.textarea.select_all();
+        self.input.textarea.cut();
 
         self.input.textarea.set_placeholder_text("<Esc> to cancel, <Enter> to confirm");
     }
@@ -510,26 +521,26 @@ impl AppContext {
         self.input.label = "No Input Required".into();
     }
 
-    fn post_action_add_subkey(&mut self, name: String) {
+    fn post_action_add_subkey(&mut self, action: ActionAddSubkey) {
         let Some(last) = self.key_states.last_mut() else { unreachable!() };
-        let Err(index) = last.subkeys.binary_search_by(|s| s.cmp(&name)) else { unreachable!() };
+        let Err(index) = last.subkeys.binary_search_by(|s| s.cmp(&action.name)) else { unreachable!() };
 
-        last.subkeys.insert(index, name);
+        last.subkeys.insert(index, action.name);
 
         self.key_table.resize(last.subkeys.len() * ITEM_HEIGHT);
         self.select_row_in(ViewState::Keys, index);
     }
 
-    fn post_action_rename_subkey(&mut self, original: String, new: String) {
+    fn post_action_rename_subkey(&mut self, action: ActionRenameSubkey) {
         let Some(last) = self.key_states.last_mut() else { unreachable!() };
-        let Some(subkey_index) = last.subkeys.iter().position(|a| *a == original) else { unreachable!() };
+        let Some(subkey_index) = last.subkeys.iter().position(|a| *a == action.original) else { unreachable!() };
 
-        last.subkeys[subkey_index] = new;
+        last.subkeys[subkey_index] = action.new;
     }
 
-    fn post_action_delete_subkey(&mut self, name: String) {
+    fn post_action_delete_subkey(&mut self, action: ActionDeleteSubkey) {
         let Some(last) = self.key_states.last_mut() else { unreachable!() };
-        let Ok(index) = last.subkeys.binary_search_by(|s| s.cmp(&name)) else { unreachable!() };
+        let Ok(index) = last.subkeys.binary_search_by(|s| s.cmp(&action.name)) else { unreachable!() };
 
         last.subkeys.remove(index);
 
@@ -537,10 +548,40 @@ impl AppContext {
         self.select_row_in(ViewState::Keys, index - 1);
     }
 
-    fn post_action_new_key_type(&mut self, ty: windows_registry::Type) {
-        let Some((state, subkey)) = self.get_selected_subkey() else { unreachable!() };
+    fn input_stage_new_value_type(&mut self, stage: StageNewValueType) {
+        let confirm = move |input: String| {
+            let ty = registry::str_to_type(input.as_ref());
+
+            (
+                None,
+                PostAction::Stage(ActionStage {
+                    ty: InputStageType::NewValueData(StageNewValueData { name: stage.name.clone(), ty }) 
+                })
+            )
+        };
+
+        self.input.label = "Choose Type:".into();
+        self.set_choice_input(registry::get_type_choices_vec(), Box::new(confirm));
+    }
+
+    fn input_stage_new_value_data(&mut self, stage: StageNewValueData) {
+        let validate = move |input: &str| {
+            Ok(())
+        };
+
+        let confirm = move |input: String| {
+            (None, PostAction::None)
+        };
 
         self.input.label = "Enter Value:".into();
+        self.set_textarea_input(Box::new(validate), Box::new(confirm));
+    }
+
+    fn post_action_stage(&mut self, action: ActionStage) {
+        match action.ty {
+            InputStageType::NewValueType(stage) => self.input_stage_new_value_type(stage),
+            InputStageType::NewValueData(stage) => self.input_stage_new_value_data(stage),
+        }
     }
 
     pub fn confirm_input(&mut self) {
@@ -553,6 +594,8 @@ impl AppContext {
             InputType::Choice(ref choices) => choices.items[choices.selected].clone(),
         };
 
+        let mut should_reset_input = true;
+
         match self.input.confirm_fn.as_ref() {
             Some(confirm_fn) => {
                 let (message, action) = (confirm_fn)(text);
@@ -564,11 +607,14 @@ impl AppContext {
                 message.map(|result| self.set_message_with_state(result, last_selected));
 
                 match action {
-                    PostAction::AddSubkey(ActionAddSubkey { name }) => self.post_action_add_subkey(name),
-                    PostAction::RenameSubkey(ActionRenameSubkey { original, new }) => self.post_action_rename_subkey(original, new),
-                    PostAction::DeleteSubkey(ActionDeleteSubkey { name }) => self.post_action_delete_subkey(name),
+                    PostAction::AddSubkey(action) => self.post_action_add_subkey(action),
+                    PostAction::RenameSubkey(action) => self.post_action_rename_subkey(action),
+                    PostAction::DeleteSubkey(action) => self.post_action_delete_subkey(action),
 
-                    PostAction::Stage(_) => (),
+                    PostAction::Stage(action) => {
+                        should_reset_input = false;
+                        self.post_action_stage(action);
+                    }
 
                     PostAction::None => (),
                 };
@@ -576,7 +622,9 @@ impl AppContext {
             None => (),
         };
 
-        self.reset_input();
+        if should_reset_input {
+            self.reset_input();
+        }
     }
 
     pub fn set_message_with_state(&mut self, message: AppMessage, last_selected: LastSelected) {
@@ -608,7 +656,7 @@ impl AppContext {
             return Err("Name of a key can't be longer than 255 characters".into());
         }
 
-        let found_key = subkeys.iter().find(|a| *a.to_lowercase() == input.to_lowercase());
+        let found_key = subkeys.iter().find(|&a| a.to_lowercase() == input.to_lowercase());
         let is_excluded = exclude_keys.iter().any(|a| *a.to_lowercase() == input.to_lowercase());
         if found_key.is_some() && !is_excluded {
             return Err("This key already exists".into());
@@ -618,6 +666,22 @@ impl AppContext {
     }
 
     fn value_name_validator(input: &str, values: &Vec<NamedValue>, exclude_values: &Vec<NamedValue>) -> Result<(), String> {
+        if input.trim().is_empty() {
+            return Err("Can't be empty".into());
+        }
+        if input.contains('/') {
+            return Err("Name of a value can't contain forward slashes".into());
+        }
+        if input.len() > 16383 {
+            return Err("Name of a value can't be longer than 16,383 characters".into());
+        }
+
+        let found_value = values.iter().find(|&a| a.name.to_lowercase() == input.to_lowercase());
+        let is_excluded = exclude_values.iter().any(|a| *a.name.to_lowercase() == input.to_lowercase());
+        if found_value.is_some() && !is_excluded {
+            return Err("This value already exists".into());
+        }
+
         Ok(())
     }
 
@@ -657,18 +721,30 @@ impl AppContext {
     }
 
     pub fn new_value(&mut self) {
-        if let None = self.get_selected_subkey() {
-            self.set_message(AppMessage::info("No key selected."));
-            return;
+        let (state, key) = match self.get_selected_subkey() {
+            Some((state, key)) => (state, key),
+            None => {
+                self.set_message(AppMessage::info("No key selected."));
+                return;
+            } 
         };
+
+        let Some(values) = state.cached_values.get(key).cloned() else { unreachable!() };
+
+        let exclude = Vec::new();
+        let validate = move |input: &str| { Self::value_name_validator(input, &values, &exclude) };
 
         let confirm = move |input: String| {
-            let ty = registry::str_to_type(input.as_ref());
-            (None, PostAction::None)
+            (
+                None,
+                PostAction::Stage(ActionStage {
+                    ty: InputStageType::NewValueType(StageNewValueType { name: input }) 
+                })
+            )
         };
 
-        self.input.label = "Choose Type:".into();
-        self.set_choice_input(registry::get_type_choices_vec(), Box::new(confirm));
+        self.input.label = "Enter Name:".into();
+        self.set_textarea_input(Box::new(validate), Box::new(confirm));
     }
 
     fn truncate_name(s: impl AsRef<str>, max_len: usize, sides_size: usize) -> String {
